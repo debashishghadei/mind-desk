@@ -1,0 +1,6 @@
+tests/ export-ignore
+src/ export-ignore
+bin/ export-ignore
+HANDOFF.md export-ignore
+DECISIONS.md export-ignore
+*.bat text eol=crlf
