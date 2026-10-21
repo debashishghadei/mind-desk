@@ -18,10 +18,11 @@ Everything runs on your PC: one file in Microsoft Edge or Google Chrome, talking
 2. Double-click **Open Mind Desk.bat**. (Or double-click `mind-desk.html` to open it in a normal browser tab.)
 3. Optional: right-click its icon on the taskbar → **Pin to taskbar**.
 
-Always open it the same way in the same browser. Your notes are stored in that browser on this PC.
+Always open it the same way in the same browser. Your notes are stored in that browser on this PC. Only one Mind Desk window works at a time; a second one offers **Use Mind Desk here**.
 
 ## Connect Ollama (one time, about 10 minutes)
 
+0. If Ollama is not installed: download it from ollama.com/download, install it and open **Ollama** from the Start menu.
 1. **Get a model.** Press the Windows key, type `cmd`, press Enter. Type `ollama pull qwen3:8b` and press Enter. Wait for `success`.
 2. **Allow Mind Desk to talk to Ollama.** Mind Desk is a file on your PC, and Ollama blocks files by default.
    Windows key → type `environment` → open **Edit environment variables for your account** → under *User variables* click **New…** →
@@ -29,7 +30,7 @@ Always open it the same way in the same browser. Your notes are stored in that b
 3. **Restart Ollama.** Right-click the llama icon near the clock → **Quit Ollama**, then open **Ollama** from the Start menu.
 4. In Mind Desk open **Settings** → **Test connection**, then **Try a quick test note**.
 
-With `OLLAMA_ORIGINS=*`, websites you visit could also send requests to your local Ollama. They cannot read your notes or files. You can remove the setting when you are not using Mind Desk.
+With `OLLAMA_ORIGINS=*`, websites you visit could also use your local AI (send it prompts, see your model list). They cannot read Mind Desk's notes or your files. You can remove the setting when you are not using Mind Desk. Model names ending in `cloud` run on Ollama's servers, not your PC; Mind Desk warns about them.
 
 ## Daily use
 
@@ -47,7 +48,7 @@ Settings → **Copy & paste**. Mind Desk shows a prompt, you paste it into ChatG
 
 ## Backup
 
-- Settings → **Download backup** (a `.json` file) and **Restore from backup…**
+- Settings → **Download backup** (a `.json` file) and **Restore from backup…** A backup is fully checked before it replaces anything; it never contains an API key, and restoring keeps this PC's AI connection.
 - Settings → **Choose a folder…** keeps a live copy as normal files: `Organized\*.md`, `Originals\*.txt`, `Mind Desk backup.json`. After restarting the browser, click **reconnect folder** at the bottom left once.
 - Clearing the browser's "cookies and site data" can delete Mind Desk's data. Keep a backup.
 
@@ -58,5 +59,5 @@ Replace `mind-desk.html` (and the `.bat`) with the new files. Your data stays.
 ## For developers
 
 - Source: `src/` (`core.js` logic, `app.js` interface, `style.css`, `index.html`). Build the single file with `node bin/build.js` (`--zip` also makes `dist/mind-desk-<version>.zip`).
-- Tests: `tests/run-tests.js` runs Chromium (Playwright) against `mind-desk.html` opened from a `file://` URL, with a stand-in Ollama (`tests/fake-ollama.js`). `REAL_OLLAMA=http://127.0.0.1:11434` adds a check against a real Ollama.
+- Tests: `tests/run-tests.js` runs Chromium (Playwright) against `mind-desk.html` opened from a `file://` URL, with a stand-in Ollama (`tests/fake-ollama.js`). `REAL_OLLAMA=http://127.0.0.1:11434` adds a check against a real Ollama. `tests/review-tests.js` covers the review points (R1–R18).
 - Shared notes for the AIs working on this repo: `HANDOFF.md`, `DECISIONS.md`.

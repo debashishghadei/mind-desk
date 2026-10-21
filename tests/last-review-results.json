@@ -1,0 +1,97 @@
+{
+ "html": "/tmp/claude-0/-home-claude/7922ff25-1963-5e9a-a107-1c9d28cba34a/scratchpad/zipcheck101/mind-desk/mind-desk.html",
+ "date": "2026-10-21T17:19:30.018Z",
+ "chromium": "141.0.7390.37",
+ "results": [
+  {
+   "name": "R1 two open windows cannot silently overwrite each other",
+   "ok": true,
+   "ms": 1336
+  },
+  {
+   "name": "R1b the second window can take over; the first one then stops and its data is not reused",
+   "ok": true,
+   "ms": 1066
+  },
+  {
+   "name": "R2 a failed read at start never turns into an empty app that overwrites data",
+   "ok": true,
+   "ms": 1560
+  },
+  {
+   "name": "R3 a damaged backup is rejected before it replaces anything (incl. category loops)",
+   "ok": true,
+   "ms": 1975
+  },
+  {
+   "name": "R4 folder copy: notes or categories with the same name do not overwrite each other",
+   "ok": true,
+   "ms": 455
+  },
+  {
+   "name": "R5 after stopping \"Ask AI again\", a second \"Ask AI again\" works",
+   "ok": true,
+   "ms": 3843
+  },
+  {
+   "name": "R6 copy & paste mode: Stop always ends the run; background is blocked while a window is open",
+   "ok": true,
+   "ms": 1169
+  },
+  {
+   "name": "R7 splitting with --- keeps the right original for each part",
+   "ok": true,
+   "ms": 436
+  },
+  {
+   "name": "R8 deleting a note during a run leaves no orphan items or tasks",
+   "ok": true,
+   "ms": 1844
+  },
+  {
+   "name": "R9 a storage write that aborts is reported, not left hanging",
+   "ok": true,
+   "ms": 141
+  },
+  {
+   "name": "R10 guardrails catch changed meaning (negation, numbers, short rewrites) but allow heavy typo fixes",
+   "ok": true,
+   "ms": 130
+  },
+  {
+   "name": "R11 tasks: invented tasks are flagged; \"done\" needs a sign in the note",
+   "ok": true,
+   "ms": 104
+  },
+  {
+   "name": "R12 splitter: lines of one paragraph can become separate items; ----- always separates",
+   "ok": true,
+   "ms": 504
+  },
+  {
+   "name": "R13 questions step reads every note fully (long notes, many notes)",
+   "ok": true,
+   "ms": 978
+  },
+  {
+   "name": "R14 a long note gets a big enough AI context (not cut off)",
+   "ok": true,
+   "ms": 366
+  },
+  {
+   "name": "R15 folder/Markdown files match the screen (tagged notes, linked tasks)",
+   "ok": true,
+   "ms": 153
+  },
+  {
+   "name": "R17 privacy: backups do not contain the API key; restoring keeps this PC's AI address; remote/cloud AI is warned about",
+   "ok": true,
+   "ms": 925
+  },
+  {
+   "name": "R18 unfinished edits and half-answered questions are not lost silently; setup explains installing Ollama",
+   "ok": true,
+   "ms": 1294
+  }
+ ]
+}

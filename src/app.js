@@ -14,15 +14,16 @@
 
   /* ================= storage ================= */
   const store = {
-    db: null,
+    db: null, failed: '',
     async open() {
+      if (typeof indexedDB === 'undefined') { this.db = null; return; } // simple storage mode
       try {
         this.db = await new Promise((res, rej) => {
           const r = indexedDB.open('mind-desk', 1);
           r.onupgradeneeded = () => r.result.createObjectStore('kv');
-          r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+          r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); r.onblocked = () => rej(new Error('storage is blocked by another window'));
         });
-      } catch (e) { this.db = null; }
+      } catch (e) { this.failed = (e && e.message) || 'unknown error'; }
     },
     async get(k) {
       if (!this.db) { try { const v = localStorage.getItem('mind-desk:' + k); return v ? JSON.parse(v) : undefined; } catch (e) { return undefined; } }
@@ -30,7 +31,24 @@
     },
     async set(k, v) {
       if (!this.db) { localStorage.setItem('mind-desk:' + k, JSON.stringify(v)); return; }
-      return new Promise((res, rej) => { const tx = this.db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(v, k); tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); });
+      return new Promise((res, rej) => {
+        const tx = this.db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(v, k);
+        tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error || new Error('write failed')); tx.onabort = () => rej(tx.error || new Error('write was aborted'));
+      });
+    },
+    /** save the state only if nobody else saved a newer one since we loaded it */
+    async putState(state, rev) {
+      if (!this.db) {
+        const cur = JSON.parse(localStorage.getItem('mind-desk:state') || 'null');
+        if (cur && (cur.rev || 0) > rev) return false;
+        localStorage.setItem('mind-desk:state', JSON.stringify(state)); return true;
+      }
+      return new Promise((res, rej) => {
+        const tx = this.db.transaction('kv', 'readwrite'); const os = tx.objectStore('kv'); let ok = true;
+        const q = os.get('state');
+        q.onsuccess = () => { const cur = q.result; if (cur && (cur.rev || 0) > rev) { ok = false; return; } os.put(state, 'state'); };
+        tx.oncomplete = () => res(ok); tx.onerror = () => rej(tx.error || new Error('write failed')); tx.onabort = () => rej(tx.error || new Error('write was aborted'));
+      });
     },
     async del(k) {
       if (!this.db) { localStorage.removeItem('mind-desk:' + k); return; }
@@ -64,15 +82,23 @@
   }
 
   let saveTimer = null, folderTimer = null, saveState = 'saved';
+  const LIFE = { ok: false, blocked: false, rev: 0 }; // ok = state loaded safely; blocked = another window took over
   function save() {
+    if (!LIFE.ok || LIFE.blocked || !S) return; // never write when the load failed or another window is in charge
     saveState = 'saving'; paintSaveState();
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(async () => {
-      try { await store.set('state', S); saveState = 'saved'; } catch (e) { saveState = 'error'; toast('Could not save: ' + e.message); }
-      paintSaveState();
-    }, 250);
+    saveTimer = setTimeout(writeState, 250);
     clearTimeout(folderTimer);
     folderTimer = setTimeout(syncFolder, 1500);
+  }
+  async function writeState() {
+    if (!LIFE.ok || LIFE.blocked) return;
+    const next = LIFE.rev + 1; S.rev = next;
+    try {
+      const ok = await store.putState(S, LIFE.rev);
+      if (ok) { LIFE.rev = next; saveState = 'saved'; } else { saveState = 'error'; blockWindow('changed'); }
+    } catch (e) { saveState = 'error'; toast('Could not save: ' + e.message + '. Mind Desk will try again with your next change.', 6000); }
+    paintSaveState();
   }
   function paintSaveState() {
     const el = $('#savestate'); if (!el) return;
@@ -97,9 +123,18 @@
   }
   const NOTE_CHIP = { new: '<span class="chip acc">New</span>', split: '<span class="chip warn">Waiting</span>', review: '<span class="chip warn">To review</span>', done: '<span class="chip good">Organized</span>' };
 
-  function itemsIn(catId) {
-    const ids = C.subtreeIds(cats(), catId);
-    return S.items.filter((i) => i.status === 'approved' && (ids.includes(i.cat) || i.tags.some((t) => ids.includes(t))));
+  function itemsIn(catId) { return C.itemsIn(S, catId); }
+  const busy = () => { if (RUN.active) { toast('Please wait until the AI run has finished, or press Stop.'); return true; } return false; };
+  const alive = (it) => S.items.includes(it);
+  const isLocal = (u) => { try { return /^(localhost|127\.\d+\.\d+\.\d+|\[::1\]|0\.0\.0\.0)$/i.test(new URL(u).hostname); } catch (e) { return false; } };
+  const isCloudModel = (m) => /(^|[-:])cloud\b/i.test(String(m || ''));
+  function remoteWarning() {
+    const s = S.settings; const out = [];
+    if (s.provider === 'ollama' && !isLocal(s.ollamaUrl)) out.push(`The Ollama address ${s.ollamaUrl} is not on this PC. Your notes will be sent to it.`);
+    if (s.provider === 'openai' && !isLocal(s.oaUrl)) out.push(`The AI address ${s.oaUrl} is not on this PC. Your notes will be sent to it.`);
+    if (s.provider === 'ollama' && isCloudModel(s.model)) out.push(`“${s.model}” is an Ollama cloud model: your notes leave your PC and go to Ollama's servers.`);
+    if (s.provider === 'manual') out.push('Copy & paste mode: your notes leave your PC when you paste them into ChatGPT or Claude.');
+    return out;
   }
   function openTaskCount() { return C.visibleTasks(S).filter((t) => !t.done).length; }
 
@@ -116,6 +151,9 @@
     unsorted: ['warn', 'AI could not choose a category'],
     aierror: ['bad', 'AI failed, your original text is kept'],
     notext: ['bad', 'AI gave no text, your original text is kept'],
+    numbers: ['bad', 'A number or date changed'],
+    negation: ['bad', 'A “not / never / don’t” word disappeared, so the meaning may have flipped'],
+    taskcheck: ['warn', 'A task may not match your note. Check the tasks.'],
   };
   function flagChips(it) {
     return (it.flags || []).map((f) => {
@@ -141,11 +179,11 @@
     const o = document.createElement('div'); o.className = 'overlay'; o.id = 'overlay';
     o.innerHTML = `<div class="modal" role="dialog" aria-modal="true">${html}</div>`;
     o.addEventListener('mousedown', (e) => { if (e.target === o && onClose) { onClose(); } });
-    document.body.appendChild(o);
+    document.body.appendChild(o); const app = $('.app'); if (app) app.inert = true;
     const f = focusSel ? o.querySelector(focusSel) : o.querySelector('textarea:not([readonly]),input'); if (f) f.focus();
     return o;
   }
-  function closeModal() { const o = $('#overlay'); if (o) o.remove(); }
+  function closeModal() { const o = $('#overlay'); if (o) o.remove(); const app = $('.app'); if (app && !LIFE.blocked) app.inert = false; }
   function showError(e) {
     const m = (e && e.message) || String(e);
     modal(`<h2>Something went wrong</h2><p class="pre">${esc(m)}</p>${e && e.conn ? connHelpHtml() : ''}<div class="actions"><button class="btn primary" data-act="closeModal">OK</button></div>`, closeModal);
@@ -169,9 +207,15 @@
     } finally { clearTimeout(t); if (RUN.ctrl === ctrl) RUN.ctrl = null; }
   }
 
-  async function ollamaChat(system, user, schema) {
+  /** context size big enough for prompt + answer (organize answers are as long as the note) */
+  function ctxSize(system, user, outFactor) {
+    const need = Math.ceil((system.length + user.length * (1 + outFactor)) / 3.2) + 768;
+    if (need > 32768) { const e = new Error(`This item is too long for the AI in one go (about ${Math.round(user.length / 6).toLocaleString()} words). Open it, use Edit and put --- lines to split it, then press “Ask AI again”.`); e.tooLong = true; throw e; }
+    return Math.max(+S.settings.numCtx || 8192, Math.ceil(need / 1024) * 1024);
+  }
+  async function ollamaChat(system, user, schema, outFactor = 1) {
     const s = S.settings; const base = s.ollamaUrl.replace(/\/+$/, '');
-    const body = { model: s.model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], stream: false, options: { temperature: +s.temperature, num_ctx: +s.numCtx }, keep_alive: '10m' };
+    const body = { model: s.model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], stream: false, options: { temperature: +s.temperature, num_ctx: ctxSize(system, user, outFactor) }, keep_alive: '10m' };
     if (schema) body.format = schema;
     if (!s.think) body.think = false;
     return withTimeout(async (signal) => {
@@ -204,7 +248,7 @@
     let last;
     for (let attempt = 0; attempt < 2; attempt++) {
       if (RUN.stop) throw abortErr();
-      const raw = S.settings.provider === 'openai' ? await openaiChat(system, user) : await ollamaChat(system, user, C.SCHEMAS[step]);
+      const raw = S.settings.provider === 'openai' ? await openaiChat(system, user) : await ollamaChat(system, user, C.SCHEMAS[step], step === 'organize' ? 1 : 0.2);
       try { return C.parseJSON(raw); } catch (e) { last = e; }
     }
     throw last;
@@ -214,6 +258,7 @@
   /** copy & paste mode: show the prompt, wait for the pasted answer */
   function askManual(title, text) {
     return new Promise((resolve, reject) => {
+      RUN.manualReject = () => { RUN.manualReject = null; closeModal(); reject(abortErr()); };
       modal(`<h2>${esc(title)}</h2>
         <p class="hint">1. Copy this prompt. 2. Paste it into ChatGPT or Claude. 3. Copy the whole answer and paste it below.</p>
         <textarea id="mpPrompt" rows="8" readonly>${esc(text)}</textarea>
@@ -227,9 +272,9 @@
       };
       $('#mpOk').onclick = () => {
         const v = $('#mpAns').value;
-        try { const obj = C.parseJSON(v); closeModal(); resolve(obj); } catch (e) { const b = $('#mpErr'); b.style.display = 'block'; b.textContent = 'This does not look like the JSON answer. Copy the complete answer (it starts with { ) and try again.'; }
+        try { const obj = C.parseJSON(v); RUN.manualReject = null; closeModal(); resolve(obj); } catch (e) { const b = $('#mpErr'); b.style.display = 'block'; b.textContent = 'This does not look like the JSON answer. Copy the complete answer (it starts with { ) and try again.'; }
       };
-      $('#mpCancel').onclick = () => { closeModal(); reject(abortErr()); };
+      $('#mpCancel').onclick = () => { if (RUN.manualReject) RUN.manualReject(); };
     });
   }
 
@@ -246,12 +291,18 @@
     return { id: C.uid('i'), noteId: note.id, order: k, original: text, text, title: '', cat: 'unsorted', tags: [], status: 'pending', flags: [], lost: [], surveyed: false, createdAt: note.addedAt, updatedAt: Date.now() };
   }
   function addItemsFromGroups(note, blocks, groups) {
-    groups.forEach((g, k) => S.items.push(newItem(note, k, g.map((i) => blocks[i]).join('\n\n'))));
+    if (!S.notes.includes(note)) return; // note was deleted meanwhile
+    groups.forEach((g, k) => {
+      let text = '';
+      g.forEach((bi, j) => { text += (j === 0 ? '' : blocks[bi].same ? '\n' : '\n\n') + blocks[bi].text; });
+      S.items.push(newItem(note, k, text));
+    });
     note.status = 'split';
   }
+  const hardStarts = (blocks, idxs) => idxs.map((bi, k) => (k > 0 && blocks[bi].hard ? k + 1 : 0)).filter(Boolean);
 
   async function splitNote(note) {
-    const blocks = C.makeBlocks(note.text);
+    const blocks = C.makeBlocks(note.text, true);
     if (!blocks.length) { note.status = 'split'; return; }
     if (blocks.length === 1) { addItemsFromGroups(note, blocks, [[0]]); return; }
     const groups = [];
@@ -262,7 +313,7 @@
         const p = C.buildSplitPrompt(prompt('split'), blocks, win);
         starts = (await aiJSON('split', p.system, p.user)).starts;
       } catch (e) { if (e.name === 'AbortError' || e.conn) throw e; starts = win.map((_, k) => k + 1); }
-      for (const g of C.groupsFromStarts(win.length, starts)) groups.push(g.map((k) => win[k]));
+      for (const g of C.groupsFromStarts(win.length, starts, hardStarts(blocks, win))) groups.push(g.map((k) => win[k]));
     }
     addItemsFromGroups(note, blocks, groups);
   }
@@ -270,7 +321,7 @@
   async function splitManual(notes) {
     const payload = [];
     for (const n of notes) {
-      const blocks = C.makeBlocks(n.text);
+      const blocks = C.makeBlocks(n.text, true);
       if (blocks.length <= 1) addItemsFromGroups(n, blocks, blocks.length ? [[0]] : []); else payload.push({ id: n.id, note: n, blocks });
     }
     if (!payload.length) return;
@@ -278,40 +329,49 @@
     const list = Array.isArray(ans.notes) ? ans.notes : [];
     for (const p of payload) {
       const hit = list.find((x) => x && String(x.id) === p.id);
-      addItemsFromGroups(p.note, p.blocks, C.groupsFromStarts(p.blocks.length, hit ? hit.starts : p.blocks.map((_, k) => k + 1)));
+      const all = p.blocks.map((_, k) => k);
+      addItemsFromGroups(p.note, p.blocks, C.groupsFromStarts(p.blocks.length, hit ? hit.starts : all.map((k) => k + 1), hardStarts(p.blocks, all)));
     }
   }
 
+  /** the questions step reads every item completely: long items are cut into pieces, all pieces are sent */
   async function runSurvey(items) {
     const manual = S.settings.provider === 'manual';
     const limit = manual ? 30000 : 8000;
-    const chunks = []; let cur = '';
-    for (const it of items) { const t = it.original + '\n\n---\n\n'; if (cur && cur.length + t.length > limit) { chunks.push(cur); cur = ''; } cur += t.slice(0, limit); }
-    if (cur) chunks.push(cur);
-    let all = [];
-    if (manual) {
-      const ans = await askManual('Step 2 of 3: questions about your notes', C.bulkSurveyPrompt(prompt('survey'), chunks.join('\n').slice(0, limit), ctx()));
-      all = ans.questions || [];
-    } else {
-      for (let i = 0; i < chunks.length && i < 4; i++) {
-        setProgress('Reading your notes for questions', i, Math.min(chunks.length, 4));
-        const p = C.buildSurveyPrompt(prompt('survey'), chunks[i], ctx());
-        try { all = all.concat((await aiJSON('survey', p.system, p.user)).questions || []); } catch (e) { if (e.name === 'AbortError' || e.conn) throw e; }
+    const chunks = []; let cur = { text: '', items: new Set() };
+    const push = () => { if (cur.text) chunks.push(cur); cur = { text: '', items: new Set() }; };
+    for (const it of items) {
+      for (let pos = 0; pos < it.original.length; pos += limit - 200) {
+        const piece = it.original.slice(pos, pos + limit - 200) + '\n\n---\n\n';
+        if (cur.text && cur.text.length + piece.length > limit) push();
+        cur.text += piece; cur.items.add(it);
       }
     }
+    push();
+    let all = []; const failed = new Set();
+    for (let i = 0; i < chunks.length; i++) {
+      setProgress('Reading your notes for questions', i, chunks.length);
+      try {
+        if (manual) all = all.concat((await askManual(`Step 2 of 3: questions about your notes${chunks.length > 1 ? ` (part ${i + 1} of ${chunks.length})` : ''}`, C.bulkSurveyPrompt(prompt('survey'), chunks[i].text, ctx()))).questions || []);
+        else { const p = C.buildSurveyPrompt(prompt('survey'), chunks[i].text, ctx()); all = all.concat((await aiJSON('survey', p.system, p.user)).questions || []); }
+      } catch (e) { if (e.name === 'AbortError' || e.conn) throw e; chunks[i].items.forEach((it) => failed.add(it)); }
+    }
+    if (failed.size) toast(`The questions step failed for ${failed.size} note part(s) (the AI answer was not usable). They are organized without questions.`, 7000);
     return C.checkSurvey(all, ctx());
   }
 
   function applyResult(it, chk) {
+    if (!alive(it)) return; // deleted or replaced meanwhile: drop the answer
     it.title = chk.title; it.cat = chk.category; it.tags = chk.tags; it.text = chk.text; it.flags = chk.flags; it.lost = chk.lost; it.error = '';
     it.status = 'review'; it.updatedAt = Date.now();
     S.tasks = S.tasks.filter((t) => t.itemId !== it.id).concat(chk.tasks.map((t) => ({ id: C.uid('t'), itemId: it.id, text: t.text, done: t.done, cat: t.cat, createdAt: it.createdAt })));
   }
   function failItem(it, e) {
+    if (!alive(it)) return;
     it.status = 'review'; it.flags = ['aierror']; it.error = (e && e.message) || 'unknown error'; it.text = it.original; it.cat = 'unsorted';
     it.title = it.title || it.original.split(/\s+/).slice(0, 7).join(' ');
   }
-  const SERIOUS = ['shortened', 'lostword', 'bigchange'];
+  const SERIOUS = ['shortened', 'lostword', 'bigchange', 'numbers', 'negation'];
   async function organizeOne(it) {
     const c = ctx(); const p = C.buildOrganizePrompt(prompt('organize'), it.original, c);
     let chk = C.checkOrganize(await aiJSON('organize', p.system, p.user), it.original, c);
@@ -346,6 +406,8 @@
     if (RUN.active) return;
     const manual = S.settings.provider === 'manual';
     if (!S.notes.some((n) => n.status === 'new') && !S.items.some((i) => i.status === 'pending')) { toast('Nothing new to organize. Add notes first.'); return; }
+    const warn = remoteWarning().filter((w) => !/Copy & paste/.test(w));
+    if (warn.length && !window.confirm(warn.join('\n') + '\n\nContinue?')) return;
     RUN.active = true; RUN.stop = false; paintTop();
     try {
       const fresh = S.notes.filter((n) => n.status === 'new');
@@ -378,6 +440,7 @@
         for (let i = 0; i < todo.length; i++) {
           if (RUN.stop) throw abortErr();
           setProgress('Organizing', i, todo.length);
+          if (!alive(todo[i])) continue;
           try { await organizeOne(todo[i]); } catch (e) { if (e.name === 'AbortError' || e.conn) throw e; failItem(todo[i], e); }
           save(); if (UI.view === 'inbox') renderContent();
         }
@@ -388,7 +451,7 @@
     } catch (e) {
       if (e.name !== 'AbortError') showError(e); else toast('Stopped. Press “Organize all” to continue later.');
     } finally {
-      RUN.active = false; RUN.stop = false; RUN.surveyWait = null; save(); render();
+      RUN.active = false; RUN.stop = false; RUN.surveyWait = null; RUN.manualReject = null; save(); render();
     }
   }
 
@@ -410,11 +473,13 @@
       const root = FOLDER.handle;
       await writeFile(root, 'Mind Desk backup.json', JSON.stringify(exportObj(), null, 1));
       const org = await root.getDirectoryHandle('Organized', { create: true });
-      const files = [];
+      const files = []; const taken = new Set();
       for (const c of S.categories.filter((x) => !x.parent)) {
-        const has = itemsIn(c.id).length || (c.id === 'todo' && C.visibleTasks(S).length);
+        const has = itemsIn(c.id).length || (c.id === 'todo' && C.visibleTasks(S).length) || C.linkedTasks(S, c.id).length;
         if (!has) continue;
-        const name = C.safeName(c.name) + '.md'; files.push(name);
+        let base = C.safeName(c.name), name = base + '.md', k = 2;
+        while (taken.has(name.toLowerCase())) name = `${base} (${k++}).md`; // Windows ignores upper/lower case
+        taken.add(name.toLowerCase()); files.push(name);
         await writeFile(org, name, C.categoryMarkdown(S, c.id));
       }
       for (const old of S.folderFiles) if (!files.includes(old)) { try { await org.removeEntry(old); } catch (e) { /* gone */ } }
@@ -422,17 +487,21 @@
       const orig = await root.getDirectoryHandle('Originals', { create: true });
       for (const n of S.notes) {
         if (S.folderOriginals.includes(n.id)) continue;
-        await writeFile(orig, `${new Date(n.addedAt).toISOString().slice(0, 10)} ${C.safeName(n.name)}.txt`, n.text);
+        await writeFile(orig, `${new Date(n.addedAt).toISOString().slice(0, 10)} ${C.safeName(n.name)} [${n.id.slice(-6)}].txt`, n.text);
         S.folderOriginals.push(n.id);
       }
-      await store.set('state', S);
+      save();
       FOLDER.msg = 'Last saved to folder at ' + new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
     } catch (e) { FOLDER.ok = false; FOLDER.msg = 'Folder save failed: ' + e.message; }
     paintSaveState();
   }
 
   /* ================= export / import ================= */
-  function exportObj() { const o = JSON.parse(JSON.stringify(S)); o.exportedAt = Date.now(); o.version = VERSION; delete o.folderFiles; delete o.folderOriginals; return o; }
+  function exportObj() {
+    const o = JSON.parse(JSON.stringify(S)); o.exportedAt = Date.now(); o.version = VERSION;
+    delete o.folderFiles; delete o.folderOriginals; delete o.rev; if (o.settings) delete o.settings.oaKey; // never put the API key in a backup
+    return o;
+  }
   function download(name, text, type) {
     const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
@@ -605,15 +674,15 @@
   /* ---------- survey ---------- */
   function viewSurvey() {
     if (!S.survey) return '<div class="empty"><b>No questions right now</b>When you organize new notes, the AI may ask about words or notes it does not understand.</div>';
-    const qs = S.survey.questions;
+    const qs = S.survey.questions; const draft = S.survey.draft || {};
     return `<p class="hint">The AI found ${qs.length} thing(s) it could not understand. Your answers are saved in <b>My words &amp; rules</b> and used every time from now on. Leave a box empty to skip it.</p>
       ${qs.map((q, k) => q.kind === 'word'
     ? `<div class="q"><label for="sq${k}"><b>What does “${esc(q.term)}” mean?</b></label>
-          <div class="row" style="margin-top:6px"><input type="text" id="sq${k}" data-q="${q.id}" style="flex:1;min-width:240px" placeholder="${esc(q.guess ? 'AI guess: ' + q.guess : 'Your meaning')}">
+          <div class="row" style="margin-top:6px"><input type="text" id="sq${k}" data-q="${q.id}" value="${esc(draft[q.id] || '')}" style="flex:1;min-width:240px" placeholder="${esc(q.guess ? 'AI guess: ' + q.guess : 'Your meaning')}">
           ${q.guess ? `<button class="btn small" data-act="useGuess" data-k="${k}">Use the guess</button>` : ''}
           <button class="btn small" data-act="keepWord" data-k="${k}" title="Not a typo, keep it unchanged">Keep as is</button></div></div>`
     : `<div class="q"><div class="quote">“${esc(q.quote)}”</div><label for="sq${k}"><b>${esc(q.question)}</b></label>
-          <div class="row" style="margin-top:6px"><input type="text" id="sq${k}" data-q="${q.id}" style="flex:1;min-width:240px" placeholder="${esc(q.guess ? 'AI guess: ' + q.guess : 'Your answer')}">
+          <div class="row" style="margin-top:6px"><input type="text" id="sq${k}" data-q="${q.id}" value="${esc(draft[q.id] || '')}" style="flex:1;min-width:240px" placeholder="${esc(q.guess ? 'AI guess: ' + q.guess : 'Your answer')}">
           ${q.guess ? `<button class="btn small" data-act="useGuess" data-k="${k}">Use the guess</button>` : ''}</div></div>`).join('')}
       <div class="actions"><button class="btn primary" data-act="submitSurvey">Save answers and continue</button><button class="btn" data-act="skipSurvey">Skip questions</button></div>`;
   }
@@ -702,6 +771,8 @@
     } else {
       ai += `<p class="hint">Mind Desk shows you a prompt to copy into ChatGPT or Claude, and you paste the answer back. Three short rounds: split, questions, organize.</p>${sField('manualBatch', 'Notes per prompt in the organize step', 'number', 'min="1" max="100"')}`;
     }
+    const warns = remoteWarning();
+    if (warns.length) ai += warns.map((w) => `<div class="banner${/Copy & paste/.test(w) ? ' info' : ' bad'}" style="margin-top:12px">${esc(w)}</div>`).join('');
     ai += '</div>';
     const survey = `<div class="box"><h2>Questions before organizing</h2>${sField('survey', 'Let the AI ask me about words and notes it does not understand', 'checkbox')}<div style="max-width:220px;margin-top:8px">${sField('surveyMax', 'Maximum questions per run', 'number', 'min="1" max="20"')}</div></div>`;
     return ai + survey + catEditor() + promptEditor() + storageBox() + `<div class="box"><h2>Look</h2><div class="field" style="max-width:220px"><label for="set-theme">Theme</label>
@@ -710,13 +781,14 @@
   }
   function ollamaHelp() {
     return `<ol class="steps">
+      <li>If Ollama is not installed yet: download it from <b>ollama.com/download</b> (Windows), run the installer, and open <b>Ollama</b> from the Start menu.</li>
       <li>Download a model once. Press the <b>Windows key</b>, type <code>cmd</code>, press <b>Enter</b>, then type <code>ollama pull ${esc(S.settings.model || 'qwen3:8b')}</code> and press <b>Enter</b>. Wait for <b>success</b>.</li>
       <li>Allow Mind Desk to talk to Ollama (needed because Mind Desk is a file on your PC):<br>
         Press the <b>Windows key</b>, type <b>environment</b>, open <b>Edit environment variables for your account</b>. Under <b>User variables</b> click <b>New…</b>.<br>
         Variable name: <code>OLLAMA_ORIGINS</code> · Variable value: <code>*</code> · click <b>OK</b>, then <b>OK</b> again.</li>
       <li>Restart Ollama: right-click the llama icon near the clock → <b>Quit Ollama</b>, then open <b>Ollama</b> from the Start menu.</li>
       <li>Come back here and click <b>Test connection</b>.</li></ol>
-      <p class="muted small">Note: with <code>*</code>, websites you visit could also send requests to Ollama on your PC. They cannot read your notes or files. If you prefer, remove the setting when you are not using Mind Desk.</p>`;
+      <p class="muted small">Note: with <code>*</code>, websites you visit could also use the AI on your PC (send it prompts, see your model list). They cannot read Mind Desk's notes or your files. You can remove the setting when you are not using Mind Desk.</p>`;
   }
   function catEditor() {
     const tops = S.categories.filter((c) => !c.parent);
@@ -761,7 +833,7 @@
 
   /* ================= actions ================= */
   const ACT = {
-    nav(el) { UI.view = el.dataset.v; UI.editing = null; UI.search = ''; render(); $('#content').scrollTop = 0; },
+    nav(el) { if (!leaveEditor()) return; UI.view = el.dataset.v; UI.editing = null; UI.search = ''; render(); $('#content').scrollTop = 0; },
     closeModal() { closeModal(); },
     addFiles() { $('#fileInput').click(); },
     pasteNote() {
@@ -779,12 +851,13 @@
     selNote(el) { UI.selNote = el.dataset.id; renderContent(); },
     renameNote(el) { const n = S.notes.find((x) => x.id === el.dataset.id); const v = window.prompt('New name', n.name); if (v && v.trim()) { n.name = v.trim().slice(0, 120); save(); render(); } },
     deleteNote(el) {
+      if (busy()) return;
       const n = S.notes.find((x) => x.id === el.dataset.id); const its = S.items.filter((i) => i.noteId === n.id);
       if (!window.confirm(`Delete “${n.name}”${its.length ? ` and the ${its.length} item(s) made from it` : ''}? This cannot be undone.`)) return;
       removeItems(its.map((i) => i.id)); S.notes = S.notes.filter((x) => x.id !== n.id); save(); render();
     },
     reorganizeNote(el) {
-      if (RUN.active) return;
+      if (busy()) return;
       const n = S.notes.find((x) => x.id === el.dataset.id); const its = S.items.filter((i) => i.noteId === n.id);
       if (its.length && !window.confirm(`This removes the ${its.length} item(s) made from this note (also approved ones and their tasks) and organizes the note again. Continue?`)) return;
       removeItems(its.map((i) => i.id)); n.status = 'new'; save(); render(); organizeAll();
@@ -793,12 +866,14 @@
     stopRun() {
       RUN.stop = true; if (RUN.ctrl) RUN.ctrl.abort();
       if (RUN.surveyWait) RUN.surveyWait.reject(abortErr());
+      if (RUN.manualReject) RUN.manualReject();
       closeModal(); toast('Stopping…');
     },
     openItem(el, e) {
       if (e) e.preventDefault();
       const it = S.items.find((i) => i.id === el.dataset.id); if (!it) return;
       if (it.status === 'pending') { toast('Not organized yet.'); return; }
+      if (!leaveEditor()) return;
       UI.view = it.status === 'review' ? 'review' : 'cat:' + it.cat; UI.focus = it.id; UI.search = ''; render();
     },
     approve(el) { const it = S.items.find((i) => i.id === el.dataset.id); it.status = 'approved'; it.updatedAt = Date.now(); save(); render(); },
@@ -808,8 +883,8 @@
       if (!window.confirm(`Approve ${list.length} item(s)?${warn ? `\n${warn} of them have warnings.` : ''}`)) return;
       list.forEach((i) => { i.status = 'approved'; i.updatedAt = Date.now(); }); save(); render();
     },
-    edit(el) { UI.editing = el.dataset.id; renderContent(); const ed = $('#editor'); if (ed) ed.scrollIntoView({ block: 'nearest' }); },
-    cancelEdit() { UI.editing = null; renderContent(); },
+    edit(el) { if (UI.editing !== el.dataset.id && !leaveEditor()) return; UI.editing = el.dataset.id; UI.dirty = false; renderContent(); const ed = $('#editor'); if (ed) ed.scrollIntoView({ block: 'nearest' }); },
+    cancelEdit() { UI.editing = null; UI.dirty = false; renderContent(); },
     addTaskRow() { const tpl = $('#taskRowTpl'); $('#edTasks').appendChild(tpl.content.cloneNode(true)); },
     rmTaskRow(el) { el.closest('[data-taskrow]').remove(); },
     saveEdit(el) {
@@ -820,16 +895,18 @@
       const old = itemTasks(it.id);
       S.tasks = S.tasks.filter((t) => t.itemId !== it.id).concat(rows.map((t, k) => ({ id: (old[k] && old[k].id) || C.uid('t'), itemId: it.id, text: t.text, done: t.done, cat: t.cat, createdAt: it.createdAt })));
       const parts = $('#edText').value.split(/\n[ \t]*---[ \t]*\n/).map((x) => x.trim()).filter(Boolean);
-      it.text = parts[0] || it.text; it.updatedAt = Date.now(); it.flags = []; it.lost = []; // you checked it yourself
+      const origs = parts.length > 1 ? C.splitOriginal(it.original, parts) : [it.original];
+      it.text = parts[0] || it.text; it.original = origs[0] || it.original; it.updatedAt = Date.now(); it.flags = []; it.lost = []; // you checked it yourself
       for (let k = 1; k < parts.length; k++) {
-        const n = { id: C.uid('i'), noteId: it.noteId, order: it.order + k / 100, original: parts[k], text: parts[k], title: it.title + ` (part ${k + 1})`, cat: it.cat, tags: [...it.tags], status: it.status, flags: [], lost: [], surveyed: true, createdAt: it.createdAt, updatedAt: Date.now() };
+        const n = { id: C.uid('i'), noteId: it.noteId, order: it.order + k / 100, original: origs[k] || parts[k], text: parts[k], title: it.title + ` (part ${k + 1})`, cat: it.cat, tags: [...it.tags], status: it.status, flags: [], lost: [], surveyed: true, createdAt: it.createdAt, updatedAt: Date.now() };
         S.items.push(n);
       }
       if (parts.length > 1) toast(`Split into ${parts.length} items.`);
-      UI.editing = null; save(); render();
+      UI.editing = null; UI.dirty = false; save(); render();
     },
     useOriginal(el) { const it = S.items.find((i) => i.id === el.dataset.id); it.text = it.original; it.flags = it.flags.filter((f) => !['shortened', 'bigchange', 'lostword', 'notext'].includes(f)); save(); renderContent(); },
     mergePrev(el) {
+      if (busy()) return;
       const it = S.items.find((i) => i.id === el.dataset.id); const prev = prevInNote(it); if (!prev) return;
       prev.original += '\n\n' + it.original; prev.text += '\n\n' + it.text; prev.tags = [...new Set([...prev.tags, ...it.tags])];
       prev.flags = [...new Set([...(prev.flags || []), ...(it.flags || [])])]; prev.status = prev.status === 'pending' ? 'pending' : 'review';
@@ -839,10 +916,10 @@
     async rerun(el) {
       if (RUN.active) return;
       const it = S.items.find((i) => i.id === el.dataset.id);
-      RUN.active = true; paintTop(); setProgress('Asking AI again', 0, 0);
+      RUN.active = true; RUN.stop = false; paintTop(); setProgress('Asking AI again', 0, 0);
       try { await organizeOne(it); toast('Updated.'); } catch (e) { if (e.name !== 'AbortError') showError(e); } finally { RUN.active = false; UI.focus = it.id; save(); render(); }
     },
-    deleteItem(el) { if (!window.confirm('Delete this item and its tasks? (Your original note stays in the Inbox.)')) return; removeItems([el.dataset.id]); save(); render(); },
+    deleteItem(el) { if (busy()) return; if (!window.confirm('Delete this item and its tasks? (Your original note stays in the Inbox.)')) return; removeItems([el.dataset.id]); save(); render(); },
     flaggedOnly(el) { UI.flaggedOnly = el.checked; renderContent(); },
     toggleTask(el) { const t = S.tasks.find((x) => x.id === el.dataset.id); t.done = el.checked; t.doneAt = t.done ? Date.now() : null; save(); render(); },
     editTask(el) { const t = S.tasks.find((x) => x.id === el.dataset.id); const v = window.prompt('Task', t.text); if (v && v.trim()) { t.text = v.trim(); save(); renderContent(); } },
@@ -853,8 +930,8 @@
       const again = $(`[data-newtask="${el.dataset.cat}"]`); if (again) again.focus();
     },
     toggleShowDone(el) { UI.showDone = el.checked; renderContent(); },
-    useGuess(el) { const q = S.survey.questions[+el.dataset.k]; $('#sq' + el.dataset.k).value = q.guess; },
-    keepWord(el) { $('#sq' + el.dataset.k).value = '(keep as is)'; },
+    useGuess(el) { const q = S.survey.questions[+el.dataset.k]; $('#sq' + el.dataset.k).value = q.guess; draftAnswer(q.id, q.guess); },
+    keepWord(el) { const q = S.survey.questions[+el.dataset.k]; $('#sq' + el.dataset.k).value = '(keep as is)'; draftAnswer(q.id, '(keep as is)'); },
     submitSurvey() {
       for (const q of S.survey.questions) {
         const v = ($(`[data-q="${q.id}"]`) || {}).value; if (!v || !v.trim()) continue;
@@ -890,7 +967,7 @@
       setConn('<span class="muted">Sending a small test note to the AI… (the first time can take a minute while the model loads)</span>');
       const sample = 'i wnat to bulid a tool tomorow for my notes..also buy milk haha';
       const c = ctx(); const p = C.buildOrganizePrompt(prompt('organize'), sample, c); const t0 = Date.now();
-      RUN.active = true;
+      RUN.active = true; RUN.stop = false;
       try {
         const chk = C.checkOrganize(await aiJSON('organize', p.system, p.user), sample, c);
         setConn(`<div class="banner info">✓ The AI answered in ${((Date.now() - t0) / 1000).toFixed(1)} s.<br><b>Before:</b> ${esc(sample)}<br><b>After:</b> ${esc(chk.text)}<br><b>Category:</b> ${esc(C.catPath(cats(), chk.category))}${chk.tasks.length ? '<br><b>Tasks:</b> ' + esc(chk.tasks.map((x) => x.text).join(' · ')) : ''}</div>`);
@@ -903,6 +980,7 @@
       S.categories.push({ id, name, parent, desc: '', area: null }); save(); render(); toast('Category added.');
     },
     delCat(el) {
+      if (busy()) return;
       const c = cat(el.dataset.id); if (!c || c.system) return;
       if (C.children(cats(), c.id).length) { toast('Delete or move its subcategories first.'); return; }
       const n = S.items.filter((i) => i.cat === c.id).length; const tn = S.tasks.filter((t) => t.cat === c.id).length;
@@ -932,18 +1010,25 @@
     },
     async forgetFolder() { FOLDER.handle = null; FOLDER.ok = false; FOLDER.name = ''; await store.del('folder'); render(); },
     exportJSON() { download(`mind-desk-backup-${today()}.json`, JSON.stringify(exportObj(), null, 1), 'application/json'); },
-    importJSON() { $('#importInput').click(); },
+    importJSON() { if (busy()) return; $('#importInput').click(); },
     downloadMD() { download(`mind-desk-${today()}.md`, C.allMarkdown(S), 'text/markdown'); },
     deleteAll() {
+      if (busy()) return;
       if (!window.confirm('Delete ALL notes, items, tasks, words and settings in Mind Desk?\nMake a backup first if you are not sure.')) return;
       if (window.prompt('Type DELETE to confirm') !== 'DELETE') return;
       S = defaultState(); UI.view = 'inbox'; save(); render(); toast('Everything deleted.');
     },
   };
+  function leaveEditor() {
+    if (!UI.editing || !UI.dirty) return true;
+    if (!window.confirm('You have changes in the editor that are not saved. Leave without saving them?')) return false;
+    UI.editing = null; UI.dirty = false; return true;
+  }
   function setConn(html) { UI.connResult = html; const el = $('#connResult'); if (el) el.innerHTML = html; }
   function removeItems(ids) {
     const set = new Set(ids); S.items = S.items.filter((i) => !set.has(i.id)); S.tasks = S.tasks.filter((t) => !set.has(t.itemId));
   }
+  function draftAnswer(id, v) { if (!S.survey) return; S.survey.draft = Object.assign({}, S.survey.draft, { [id]: v }); save(); }
   function finishSurvey() {
     S.survey = null; save();
     if (RUN.surveyWait) { RUN.surveyWait.resolve(); UI.view = 'inbox'; } else { UI.view = 'inbox'; toast('Saved. Press “Organize all” to continue.'); }
@@ -964,13 +1049,14 @@
     });
     document.addEventListener('change', (e) => {
       const el = e.target;
+      if (el.closest && el.closest('#editor')) { UI.dirty = true; return; }
       if (el.dataset.set) {
         const k = el.dataset.set; let v = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value;
         if (el.type === 'radio') v = el.value;
         S.settings[k] = v; save();
         if (k === 'provider') { UI.connResult = ''; renderContent(); }
         if (k === 'theme') applyTheme();
-        if (k === 'model') { UI.connResult = ''; }
+        if (k === 'model' || k === 'ollamaUrl' || k === 'oaUrl') { UI.connResult = ''; renderContent(); }
         return;
       }
       if (el.dataset.change === 'setCat') { const it = S.items.find((i) => i.id === el.dataset.id); it.cat = el.value; it.tags = it.tags.filter((t) => t !== it.cat); it.flags = it.flags.filter((f) => f !== 'unsorted'); save(); render(); return; }
@@ -986,7 +1072,11 @@
       if (el.id === 'fileInput') { if (el.files.length) addFiles([...el.files]); el.value = ''; return; }
       if (el.id === 'importInput') { if (el.files[0]) importFile(el.files[0]); el.value = ''; }
     });
-    document.addEventListener('input', (e) => { if (e.target.id === 'search') { UI.search = e.target.value; renderContent(); } });
+    document.addEventListener('input', (e) => {
+      if (e.target.id === 'search') { UI.search = e.target.value; renderContent(); return; }
+      if (e.target.dataset && e.target.dataset.q) { draftAnswer(e.target.dataset.q, e.target.value); return; }
+      if (e.target.closest && e.target.closest('#editor')) UI.dirty = true;
+    });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && $('#overlay') && !$('#mpPrompt')) closeModal();
       if (e.key === 'Enter' && e.target.dataset && e.target.dataset.newtask) { const b = e.target.parentElement.querySelector('[data-act=addTask]'); if (b) b.click(); }
@@ -996,26 +1086,83 @@
     window.addEventListener('dragleave', () => { depth = Math.max(0, depth - 1); if (!depth) drop.classList.remove('on'); });
     window.addEventListener('dragover', (e) => e.preventDefault());
     window.addEventListener('drop', (e) => { e.preventDefault(); depth = 0; drop.classList.remove('on'); if (e.dataTransfer && e.dataTransfer.files.length) addFiles([...e.dataTransfer.files]); });
-    window.addEventListener('beforeunload', (e) => { if (RUN.active || saveState === 'saving') { e.preventDefault(); e.returnValue = ''; } });
+    window.addEventListener('beforeunload', (e) => { if (RUN.active || saveState === 'saving' || UI.dirty) { e.preventDefault(); e.returnValue = ''; } });
   }
+  const CONNECTION = ['provider', 'ollamaUrl', 'model', 'think', 'numCtx', 'temperature', 'timeoutSec', 'oaUrl', 'oaKey', 'oaModel'];
   async function importFile(f) {
     try {
-      const o = JSON.parse(await f.text());
-      if (!C.validBackup(o)) throw new Error('This is not a Mind Desk backup file.');
-      if (!window.confirm(`Restore this backup from ${o.exportedAt ? fmtTime(o.exportedAt) : 'an unknown date'}?\nIt REPLACES everything in Mind Desk now (${o.notes.length} notes, ${o.items.length} items).`)) return;
-      S = migrate(o); delete S.exportedAt; delete S.version; S.folderFiles = []; S.folderOriginals = []; applyTheme(); UI.view = 'inbox'; save(); render(); toast('Backup restored.');
+      let o;
+      try { o = JSON.parse(await f.text()); } catch (e) { throw new Error('This file is not a Mind Desk backup (it cannot be read).'); }
+      const problem = C.backupProblem(o);
+      if (problem) throw new Error('This backup cannot be restored. Nothing was changed.\n\n' + problem);
+      if (RUN.active) throw new Error('Please wait until the AI run has finished.');
+      if (!window.confirm(`Restore this backup from ${o.exportedAt ? fmtTime(o.exportedAt) : 'an unknown date'}?\nIt REPLACES everything in Mind Desk now (${o.notes.length} notes, ${o.items.length} items).\nYour AI connection settings on this PC stay as they are.`)) return;
+      const keep = {}; for (const k of CONNECTION) keep[k] = S.settings[k];
+      const next = migrate(o); Object.assign(next.settings, keep);
+      delete next.exportedAt; delete next.version; next.folderFiles = []; next.folderOriginals = [];
+      S = next; applyTheme(); UI.view = 'inbox'; UI.editing = null; save(); render(); toast('Backup restored.');
     } catch (e) { showError(e); }
   }
 
   /* ================= start ================= */
-  async function start() {
-    await store.open();
-    try { S = migrate(await store.get('state')); } catch (e) { S = defaultState(); }
-    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-    await initFolder();
-    applyTheme(); wire(); render();
+  function screen(html, attr) {
+    const old = $('#blocker'); if (old) old.remove();
+    const o = document.createElement('div'); o.className = 'overlay'; o.id = 'blocker'; o.setAttribute(attr, '');
+    o.innerHTML = `<div class="modal" role="alertdialog" aria-modal="true">${html}</div>`;
+    document.body.appendChild(o); const app = $('.app'); if (app) app.inert = true;
+    return o;
+  }
+  function fatal(title, msg) {
+    screen(`<h2>${esc(title)}</h2><p class="pre">${esc(msg)}</p><p class="hint">Your notes have not been touched. Close other Mind Desk windows, then try again. If this keeps happening, restart the browser or the PC.</p>
+      <div class="actions"><button class="btn primary" onclick="location.reload()">Try again</button></div>`, 'data-fatal');
+  }
+  /** another window is in charge (or saved newer data): stop writing, offer to take over */
+  function blockWindow(reason) {
+    LIFE.blocked = true; clearTimeout(saveTimer); clearTimeout(folderTimer);
+    RUN.stop = true; if (RUN.ctrl) RUN.ctrl.abort(); if (RUN.manualReject) RUN.manualReject(); if (RUN.surveyWait) RUN.surveyWait.reject(abortErr());
+    const text = reason === 'changed'
+      ? 'Your notes were changed in another Mind Desk window. To avoid overwriting them, this window stopped saving.'
+      : 'Mind Desk is open in another window or tab. Only one window can work at a time, so nothing gets overwritten.';
+    const o = screen(`<h2>Mind Desk is open somewhere else</h2><p>${text}</p>
+      <div class="actions"><button class="btn primary" id="takeOver">Use Mind Desk here</button></div>
+      <p class="muted small">The other window will then stop and show this message.</p>`, 'data-blocked');
+    $('#takeOver', o).onclick = takeOver;
+  }
+  function tryLock(steal) {
+    if (!navigator.locks) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      navigator.locks.request('mind-desk-window', steal ? { steal: true } : { ifAvailable: true }, (lock) => {
+        if (!lock) { resolve(false); return null; }
+        resolve(true); return new Promise(() => {}); // hold the lock while this window is open
+      }).catch(() => { if (!LIFE.blocked) blockWindow('other'); }); // another window took over
+    });
+  }
+  async function takeOver() {
+    await tryLock(true);
+    const b = $('#blocker'); if (b) b.remove(); const app = $('.app'); if (app) app.inert = false;
+    LIFE.blocked = false;
+    if (!wired) { wire(); wired = true; }
+    await loadState();
+  }
+  async function loadState() {
+    let raw;
+    try { raw = await store.get('state'); } catch (e) { LIFE.ok = false; fatal('Could not read your saved notes', 'The browser storage did not answer (' + ((e && e.message) || e) + ').'); return false; }
+    S = migrate(raw); LIFE.rev = (raw && raw.rev) || 0; LIFE.ok = true; RUN.stop = false;
+    UI.editing = null; UI.dirty = false;
+    applyTheme(); render();
     if (S.survey) toast('The AI has questions for you. Open “Questions for you”.', 5000);
-    window.MD = { get state() { return S; }, ACT, organizeAll, render, save, store, RUN, UI, FOLDER, syncFolder, VERSION };
+    return true;
+  }
+  let wired = false;
+  async function start() {
+    window.MD = { get state() { return S; }, ACT, organizeAll, render, save, store, RUN, UI, FOLDER, LIFE, syncFolder, VERSION };
+    await store.open();
+    if (store.failed) { fatal('Could not open your saved notes', 'The browser storage could not be opened (' + store.failed + ').'); return; }
+    if (!(await tryLock(false))) { blockWindow('other'); return; }
+    if (!wired) { wire(); wired = true; }
+    if (!(await loadState())) return;
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+    await initFolder(); paintSaveState();
   }
   start();
 })();

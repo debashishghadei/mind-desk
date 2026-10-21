@@ -55,9 +55,12 @@ async function test(name, fn) {
   await test('core: blocks keep heading+list, "sol:" and "//" lines together; divider splits', async () => {
     const p = await page();
     const blocks = await p.evaluate((t) => MDCore.makeBlocks(t), SAMPLE);
-    assert.strictEqual(blocks.length, 4, JSON.stringify(blocks, null, 1));
+    // 1.0.1: lines of one paragraph are separate blocks (the AI may join them again); lists and follow-ups stay attached
+    assert.strictEqual(blocks.length, 6, JSON.stringify(blocks, null, 1));
     assert.ok(blocks[1].startsWith('why i felt fear') && blocks[1].includes('- IGS was neg') && blocks[1].includes('sol: think'));
-    assert.ok(blocks[2].includes('buy milk') && blocks[2].includes('clean white shirt'));
+    assert.deepStrictEqual([blocks[2], blocks[3]], ['buy milk & eggs', 'clean white shirt (done)']);
+    const det = await p.evaluate((t) => MDCore.makeBlocks(t, true), SAMPLE);
+    assert.deepStrictEqual(det.map((b) => [b.hard, b.same]), [[true, false], [false, false], [false, false], [false, true], [true, false], [false, true]]);
     const b2 = await p.evaluate(() => MDCore.makeBlocks('My work desires:\n\n\n1) Br computer\n//end result: new server\n\n2) Job\n//ER: ceo happy\n\nother thought'));
     assert.deepStrictEqual(b2.length, 2); assert.ok(b2[0].includes('2) Job'));
     await p.context().close();
@@ -90,7 +93,7 @@ async function test(name, fn) {
     });
     assert.deepStrictEqual(r.a.flags.sort(), ['bigchange', 'lostword', 'shortened', 'unsorted']);
     assert.strictEqual(r.a.category, 'unsorted'); assert.deepStrictEqual(r.a.tags, ['job']); assert.deepStrictEqual(r.a.lost, ['IGS']);
-    assert.strictEqual(r.a.tasks[0].done, true); assert.ok(r.a.tasks[0].cat.startsWith('todo-'));
+    assert.strictEqual(r.a.tasks[0].done, false, '1.0.1: done needs a sign in the note'); assert.ok(r.a.tasks[0].cat.startsWith('todo-'));
     assert.deepStrictEqual(r.b.flags, []); assert.strictEqual(r.b.category, 'personal'); assert.ok(r.b.title.length > 0);
     await p.context().close();
   });
@@ -145,13 +148,13 @@ async function test(name, fn) {
     await p.click('[data-act=submitSurvey]');
     await waitRunEnd(p);
     const st = await p.evaluate(() => ({ items: MD.state.items, words: MD.state.words, rules: MD.state.rules, tasks: MD.state.tasks, view: MD.UI.view }));
-    assert.strictEqual(st.items.length, 4); assert.ok(st.items.every((i) => i.status === 'review'));
+    assert.strictEqual(st.items.length, 6); assert.ok(st.items.every((i) => i.status === 'review'));
     assert.ok(st.words.some((w) => w.term === 'IGS' && /inner guidance/.test(w.meaning)));
     assert.ok(st.rules.some((r) => /Ravi/.test(r) && /client/.test(r)));
     assert.strictEqual(st.view, 'review');
     const L = await log();
     const org = L.filter((x) => /You organize one note/.test(x.system));
-    assert.strictEqual(org.length, 4);
+    assert.strictEqual(org.length, 6);
     assert.ok(L.every((x) => x.think === false && x.format && x.options.temperature === 0.2), 'think:false + JSON schema + low temperature');
     assert.ok(org[1].system.includes('IGS = inner guidance signal') && /Keep these words exactly as written: .*IGS/.test(org[1].system), 'answers are used and protected');
     assert.ok(org[0].system.includes('Madhutech = Madhu Infotech'), 'default word present');
@@ -253,7 +256,7 @@ async function test(name, fn) {
       const list = (d, pre = '') => [...d.kids].flatMap(([n, v]) => (v.kind === 'directory' ? list(v, pre + n + '/') : [pre + n]));
       return { list: list(root), todo: root.kids.get('Organized').kids.get('To-do.md').data };
     });
-    assert.ok(files.list.includes('Mind Desk backup.json') && files.list.includes('Organized/To-do.md') && files.list.some((f) => f.startsWith('Originals/') && f.endsWith('Notepad tab 3.txt')), files.list.join(', '));
+    assert.ok(files.list.includes('Mind Desk backup.json') && files.list.includes('Organized/To-do.md') && files.list.some((f) => f.startsWith('Originals/') && /Notepad tab 3 \[\w{6}\]\.txt$/.test(f)), files.list.join(', '));
     assert.ok(files.todo.includes('Make PowerPoint for owner'));
   });
 

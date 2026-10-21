@@ -30,6 +30,7 @@ const MDCore = (() => {
     split:
 `You help organize one person's quick personal notes. The note below was cut into numbered blocks.
 Some neighbouring blocks belong together: a heading and its list, a thought and its follow-up lines (starting with "//", "sol:", "ex:"), the parts of one plan or one speech.
+Blocks marked "(same paragraph)" were written directly under the block before, without an empty line. They are often, but not always, about the same thing.
 Decide where each NEW separate item starts.
 Rules:
 - One item = one thought, one plan, one topic or one list.
@@ -53,7 +54,7 @@ Return:
 2. "title": a short title in plain English, at most 8 words.
 3. "category": the id of the ONE best category.
 4. "tags": ids of other categories this note also clearly relates to (often empty).
-5. "tasks": only real actions the person intends to do (chores, buying, work tasks). Write each as a short clear task. "done" is true if it is marked done. "category" is the best to-do id. Reflections, lessons, wishes and goals are NOT tasks. Empty list if there are none.
+5. "tasks": only real actions the person intends to do (chores, buying, work tasks). Write each as a short clear task. "done" is true if it is marked done. "category" is the best to-do id. Reflections, lessons, wishes and goals are NOT tasks. Never make a task from something the person says NOT to do. "done" is true ONLY if the note clearly says it is done. Empty list if there are none.
 Categories (id: name - meaning):
 {{categories}}
 To-do ids for tasks:
@@ -87,7 +88,7 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
   function children(cats, id) { return cats.filter((c) => c.parent === id); }
   function subtreeIds(cats, id) {
     const out = [id];
-    for (let i = 0; i < out.length; i++) for (const c of cats) if (c.parent === out[i]) out.push(c.id);
+    for (let i = 0; i < out.length; i++) for (const c of cats) if (c.parent === out[i] && !out.includes(c.id)) out.push(c.id);
     return out;
   }
   function isTodoCat(cats, id) { return subtreeIds(cats, 'todo').includes(id); }
@@ -107,35 +108,38 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
   const LISTLIKE = /^\s*([-*•]|\d+[.)])\s+/;
   const FOLLOWUP = /^\s*(\/\/|(sol|solution|ex|eg|e\.g\.|er|result|reason|update|note)\s*[:.-])/i;
 
-  /** Cut a note into blocks: paragraphs (blank-line separated), joined by simple rules. */
-  function makeBlocks(text) {
+  /**
+   * Cut a note into blocks. Every line can start a new block; simple rules keep obvious pieces together
+   * (a heading with its list, "- " list lines and "//" or "sol:" follow-ups with the line above).
+   * A divider line (-----) always separates (block.hard). The AI may later join blocks, never cut them.
+   * Returns strings, or {text, hard, same} objects when detailed is true (same = no empty line before).
+   */
+  function makeBlocks(text, detailed) {
     const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
-    const paras = []; let cur = []; let hardBreak = true;
-    const flush = () => { if (cur.length) { paras.push({ text: cur.join('\n').replace(/\s+$/, ''), hard: hardBreak }); hardBreak = false; } cur = []; };
-    for (const ln of lines) {
-      if (DIVIDER.test(ln)) { flush(); hardBreak = true; continue; }
-      if (ln.trim() === '') { flush(); continue; }
-      cur.push(ln.replace(/\s+$/, ''));
-    }
-    flush();
-    const blocks = [];
-    for (const p of paras) {
+    const blocks = []; let hard = true; let blank = true;
+    for (const raw of lines) {
+      const ln = raw.replace(/\s+$/, '');
+      if (DIVIDER.test(ln)) { hard = true; blank = true; continue; }
+      if (ln.trim() === '') { blank = true; continue; }
       const prev = blocks[blocks.length - 1];
-      if (prev && !p.hard) {
-        const prevFirst = prev.text.split('\n')[0].trim();
-        const prevLast = prev.text.split('\n').pop().trim();
-        const join = FOLLOWUP.test(p.text) || /:$/.test(prevLast) || (LISTLIKE.test(p.text) && /:$/.test(prevFirst));
-        if (join) { prev.text += '\n\n' + p.text; continue; }
+      if (prev && !hard) {
+        const pl = prev.text.split('\n'); const prevFirst = pl[0].trim(); const prevLast = pl[pl.length - 1].trim();
+        const join = blank
+          ? FOLLOWUP.test(ln) || /:$/.test(prevLast) || (LISTLIKE.test(ln) && /:$/.test(prevFirst))
+          : FOLLOWUP.test(ln) || LISTLIKE.test(ln) || /:$/.test(prevLast);
+        if (join) { prev.text += (blank ? '\n\n' : '\n') + ln; blank = false; continue; }
       }
-      blocks.push({ text: p.text });
+      blocks.push({ text: ln, hard: !!prev && hard, same: !!prev && !hard && !blank });
+      hard = false; blank = false;
     }
-    return blocks.map((b) => b.text);
+    if (blocks[0]) blocks[0].hard = true;
+    return detailed ? blocks : blocks.map((b) => b.text);
   }
 
   /** turn AI "starts" into groups of block indexes (0-based). Always valid. */
-  function groupsFromStarts(n, starts) {
+  function groupsFromStarts(n, starts, forced) {
     let s = Array.isArray(starts) ? starts.map((x) => parseInt(x, 10)).filter((x) => x >= 1 && x <= n) : [];
-    s = [...new Set([1, ...s])].sort((a, b) => a - b);
+    s = [...new Set([1, ...s, ...(forced || [])])].sort((a, b) => a - b);
     const groups = [];
     for (let i = 0; i < s.length; i++) {
       const from = s[i] - 1, to = (i + 1 < s.length ? s[i + 1] - 1 : n) - 1;
@@ -148,8 +152,9 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
   function blockWindows(blocks, maxBlocks = 40, maxChars = 6000) {
     const wins = []; let cur = []; let chars = 0;
     blocks.forEach((b, i) => {
-      if (cur.length && (cur.length >= maxBlocks || chars + b.length > maxChars)) { wins.push(cur); cur = []; chars = 0; }
-      cur.push(i); chars += b.length;
+      const len = btext(b).length;
+      if (cur.length && (cur.length >= maxBlocks || chars + len > maxChars)) { wins.push(cur); cur = []; chars = 0; }
+      cur.push(i); chars += len;
     });
     if (cur.length) wins.push(cur);
     return wins;
@@ -181,11 +186,14 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     const set = new Set();
     for (const w of words) if (w.term && new RegExp('(^|[^\\w])' + reEsc(w.term) + '(?![\\w])').test(text)) set.add(w.term);
     for (const m of String(text).matchAll(/\b[A-Z][A-Z0-9]{1,5}\b/g)) set.add(m[0]);
+    for (const m of String(text).matchAll(/(?:https?:\/\/|www\.)[^\s<>"]+|[\w.+-]+@[\w-]+\.[\w.-]+/g)) set.add(m[0].replace(/[.,;:!?)]+$/, ''));
     return [...set];
   }
 
+  const btext = (b) => (typeof b === 'string' ? b : b.text);
+  const bmark = (b, k) => (k > 0 && b && b.same ? ' (same paragraph)' : '');
   function buildSplitPrompt(tpl, blocks, idxs) {
-    const user = 'Blocks:\n' + idxs.map((bi, k) => `[${k + 1}]\n${blocks[bi]}`).join('\n\n');
+    const user = 'Blocks:\n' + idxs.map((bi, k) => `[${k + 1}]${bmark(blocks[bi], k)}\n${btext(blocks[bi])}`).join('\n\n');
     return { system: tpl, user };
   }
   function buildSurveyPrompt(tpl, text, ctx) {
@@ -202,7 +210,7 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
   /* bulk versions for copy/paste mode (ChatGPT / Claude) */
   function bulkSplitPrompt(tpl, notes) {
     let user = 'There are several notes. Do the job for EACH note separately.\nAnswer only with JSON: {"notes":[{"id":"note id","starts":[...]}]}\n\n';
-    for (const n of notes) user += `=== NOTE ${n.id} ===\n` + n.blocks.map((b, k) => `[${k + 1}]\n${b}`).join('\n\n') + '\n\n';
+    for (const n of notes) user += `=== NOTE ${n.id} ===\n` + n.blocks.map((b, k) => `[${k + 1}]${bmark(b, k)}\n${btext(b)}`).join('\n\n') + '\n\n';
     return tpl + '\n\n' + user;
   }
   function bulkOrganizePrompt(tpl, items, ctx) {
@@ -245,6 +253,32 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     const re = new RegExp('(^|[^\\w])' + reEsc(term) + '(?![\\w])', 'g');
     return (String(text).match(re) || []).length;
   }
+  /** character edit distance (Levenshtein), two rows; null when too long to compute quickly */
+  function editDistance(a, b) {
+    a = String(a); b = String(b);
+    if (a.length * b.length > 1.6e7) return null;
+    let prev = new Uint32Array(b.length + 1), cur = new Uint32Array(b.length + 1);
+    for (let j = 0; j <= b.length; j++) prev[j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      cur[0] = i; const ca = a.charCodeAt(i - 1);
+      for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca === b.charCodeAt(j - 1) ? 0 : 1));
+      [prev, cur] = [cur, prev];
+    }
+    return prev[b.length];
+  }
+  const NEG = /\b(not|no|never|nothing|none|don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|can'?t|cannot|couldn'?t|isn'?t|aren'?t|wasn'?t|weren'?t|shouldn'?t|mustn'?t|haven'?t|hasn'?t|nahi|nahin|mat)\b/gi;
+  const DONE = /(\b(done|did|finished|completed?|already|sent|paid|bought|called)\b|\(done|✓|✔|\[x\])/i;
+  const STOP = new Set(['the', 'and', 'for', 'with', 'about', 'from', 'that', 'this', 'into', 'your', 'my', 'some', 'more', 'have', 'will', 'then', 'also', 'make', 'call', 'buy', 'get', 'do', 'to', 'of', 'on', 'in', 'a', 'an']);
+  const numbersOf = (t) => (String(t).match(/\d+(?:[.,:/]\d+)*/g) || []).sort().join('|');
+  const contentWords = (t) => (String(t).toLowerCase().match(/[a-z0-9]{3,}/g) || []).filter((w) => !STOP.has(w));
+  /** does the note support this task? (shares a word; the line it comes from is not negated) */
+  function taskSupport(task, original, fixed) {
+    const tw = contentWords(task).map((w) => w.slice(0, 4));
+    if (!tw.length) return true;
+    const lines = (original + '\n' + fixed).split('\n').filter((ln) => contentWords(ln).some((w) => tw.includes(w.slice(0, 4))));
+    if (!lines.length) return false;
+    return !lines.every((ln) => { NEG.lastIndex = 0; return NEG.test(ln); });
+  }
 
   /** clean an organize answer and decide which warnings to show */
   function checkOrganize(res, original, ctx) {
@@ -263,17 +297,29 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     const tags = [...new Set((Array.isArray(r.tags) ? r.tags : []).map(String).filter((t) => cats.some((c) => c.id === t) && !isTodoCat(cats, t) && t !== category && t !== 'unsorted'))];
     const subs = todoSubs(cats).map((c) => c.id);
     const area = (id) => { const c = todoSubs(cats).find((s) => s.area && subtreeIds(cats, s.area).includes(id)); return c ? c.id : null; };
-    const tasks = (Array.isArray(r.tasks) ? r.tasks : []).filter((t) => t && String(t.text || '').trim()).map((t) => ({
-      text: String(t.text).trim().slice(0, 300),
-      done: t.done === true || t.done === 'true',
-      cat: subs.includes(t.category) ? t.category : (area(category) || subs[0] || 'todo'),
-    }));
+    let taskWarn = false;
+    const tasks = (Array.isArray(r.tasks) ? r.tasks : []).filter((t) => t && String(t.text || '').trim()).map((t) => {
+      const text = String(t.text).trim().slice(0, 300);
+      if (!taskSupport(text, original, typeof r.text === 'string' ? r.text : '')) taskWarn = true;
+      return {
+        text,
+        // "done" needs a sign in the note itself; otherwise the task stays open
+        done: (t.done === true || t.done === 'true') && DONE.test(original),
+        cat: subs.includes(t.category) ? t.category : (area(category) || subs[0] || 'todo'),
+      };
+    });
+    if (taskWarn) flags.push('taskcheck');
     let title = String(r.title || '').trim().replace(/^["']|["']$/g, '').slice(0, 90);
     if (!title) title = words(text).slice(0, 7).join(' ');
     // guardrails: the typo fix must not change meaning
     const wo = words(original).length, wt = words(text).length;
-    if (wo >= 6 && wt < wo * 0.8) flags.push('shortened');
-    if (wo >= 6 && changeRatio(original, text) > 0.35) flags.push('bigchange');
+    const norm = (t) => String(t).toLowerCase().replace(/\s+/g, ' ').trim();
+    const a = norm(original), b = norm(text);
+    if ((wo >= 6 && wt < wo * 0.8) || b.length < a.length * 0.7) flags.push('shortened');
+    const dist = editDistance(a, b);
+    if (dist === null ? changeRatio(original, text) > 0.35 : dist > 4 && dist / Math.max(a.length, b.length, 1) > 0.3) flags.push('bigchange');
+    if (numbersOf(original) !== numbersOf(text)) flags.push('numbers');
+    if ((text.match(NEG) || []).length < (original.match(NEG) || []).length) flags.push('negation');
     const lost = protectedTerms(original, ctx.words).filter((t) => countTerm(text, t) < countTerm(original, t));
     if (lost.length) flags.push('lostword');
     return { title, category, tags, tasks, text, flags, lost };
@@ -307,11 +353,23 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
   function safeName(s) { return String(s).replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim().slice(0, 80) || 'untitled'; }
 
   /** Markdown for one category (approved items + open tasks) */
+  /** approved items shown in a category: main category or "also show in" tag, including subcategories */
+  function itemsIn(state, catId) {
+    const ids = subtreeIds(state.categories, catId);
+    return state.items.filter((i) => i.status === 'approved' && (ids.includes(i.cat) || (i.tags || []).some((t) => ids.includes(t))));
+  }
+  /** tasks whose to-do list is linked to this category ("also show in") */
+  function linkedTasks(state, catId) {
+    const subs = todoSubs(state.categories).filter((s) => s.area === catId).map((s) => s.id);
+    return visibleTasks(state).filter((t) => subs.includes(t.cat));
+  }
   function categoryMarkdown(state, catId) {
     const cats = state.categories; const ids = subtreeIds(cats, catId);
-    const items = state.items.filter((i) => i.status === 'approved' && ids.includes(i.cat)).sort((a, b) => a.createdAt - b.createdAt);
+    const items = itemsIn(state, catId).sort((a, b) => a.createdAt - b.createdAt);
     const isTodo = catId === 'todo' || isTodoCat(cats, catId);
     let md = `# ${catPath(cats, catId)}\n\n`;
+    const linked = isTodo ? [] : linkedTasks(state, catId);
+    if (linked.length) md += '## Tasks\n\n' + linked.map((t) => `- [${t.done ? 'x' : ' '}] ${t.text}\n`).join('') + '\n';
     if (isTodo) {
       const tasks = visibleTasks(state).filter((t) => ids.includes(t.cat));
       for (const sub of [catId, ...ids.slice(1)]) {
@@ -335,16 +393,69 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     return `# Mind Desk export (${fmtDate(Date.now())})\n\n` + tops.map((c) => categoryMarkdown(state, c.id).replace(/^(#+) /gm, '#$1 ')).join('\n');
   }
 
-  /** basic shape check for an imported backup */
-  function validBackup(o) {
-    return o && typeof o === 'object' && o.app === 'mind-desk' && Array.isArray(o.notes) && Array.isArray(o.items) && Array.isArray(o.categories) && Array.isArray(o.tasks);
+  /** full check of a backup before it may replace anything. Returns '' when fine, else the first problem in plain words. */
+  function backupProblem(o) {
+    if (!o || typeof o !== 'object' || o.app !== 'mind-desk') return 'This is not a Mind Desk backup file.';
+    for (const k of ['notes', 'items', 'tasks', 'categories']) if (!Array.isArray(o[k])) return `The backup has no ${k} list.`;
+    const isObj = (x) => x && typeof x === 'object' && !Array.isArray(x);
+    const str = (x) => typeof x === 'string';
+    const uniq = (list, what) => { const s = new Set(); for (const x of list) { if (s.has(x.id)) return `Two ${what} have the same id (${x.id}).`; s.add(x.id); } return ''; };
+    for (const [i, n] of o.notes.entries()) if (!isObj(n) || !str(n.id) || !str(n.text) || !str(n.name) || typeof n.addedAt !== 'number') return `Note number ${i + 1} is damaged.`;
+    for (const [i, c] of o.categories.entries()) if (!isObj(c) || !str(c.id) || !str(c.name) || !(c.parent === null || c.parent === undefined || str(c.parent))) return `Category number ${i + 1} is damaged.`;
+    for (const [i, it] of o.items.entries()) if (!isObj(it) || !str(it.id) || !str(it.noteId) || !str(it.original) || !str(it.text) || !str(it.cat) || !Array.isArray(it.tags) || !['pending', 'review', 'approved'].includes(it.status)) return `Item number ${i + 1} is damaged.`;
+    for (const [i, t] of o.tasks.entries()) if (!isObj(t) || !str(t.id) || !str(t.text) || !str(t.cat) || typeof t.done !== 'boolean' || !(t.itemId === null || t.itemId === undefined || str(t.itemId))) return `Task number ${i + 1} is damaged.`;
+    const dup = uniq(o.notes, 'notes') || uniq(o.items, 'items') || uniq(o.tasks, 'tasks') || uniq(o.categories, 'categories');
+    if (dup) return dup;
+    const catIds = new Set(o.categories.map((c) => c.id)); const noteIds = new Set(o.notes.map((n) => n.id)); const itemIds = new Set(o.items.map((i) => i.id));
+    for (const c of o.categories) {
+      if (c.parent && !catIds.has(c.parent)) return `Category “${c.name}” points to a missing parent.`;
+      if (c.parent && o.categories.find((p) => p.id === c.parent).parent) return `Category “${c.name}” is nested too deep (or in a loop).`;
+    }
+    for (const it of o.items) {
+      if (!noteIds.has(it.noteId)) return `An item points to a note that is not in the backup.`;
+      if (!catIds.has(it.cat) || it.tags.some((t) => !catIds.has(t))) return `An item points to a category that is not in the backup.`;
+    }
+    for (const t of o.tasks) {
+      if (t.itemId && !itemIds.has(t.itemId)) return 'A task points to an item that is not in the backup.';
+      if (!catIds.has(t.cat)) return 'A task points to a to-do list that is not in the backup.';
+    }
+    if (o.words !== undefined && (!Array.isArray(o.words) || o.words.some((w) => !isObj(w) || !str(w.term)))) return 'The word list is damaged.';
+    if (o.rules !== undefined && (!Array.isArray(o.rules) || o.rules.some((r) => !str(r)))) return 'The rule list is damaged.';
+    return '';
+  }
+  function validBackup(o) { return !backupProblem(o); }
+
+  /** after "---" splits edited text, find the matching pieces of the original (typo) text */
+  function splitOriginal(original, parts) {
+    const joined = parts.join('\n');
+    const d = diff(original, joined);
+    const mapPos = (pb) => {
+      let a = 0, b = 0;
+      for (const t of d) {
+        const len = t.s.length;
+        if (t.t === 'eq') { if (pb <= b + len) return a + (pb - b); a += len; b += len; } else if (t.t === 'del') a += len; else { if (pb <= b + len) return a; b += len; }
+      }
+      return a;
+    };
+    const snap = (pos) => {
+      if (pos <= 0 || original[pos - 1] === '\n') return pos;
+      const back = original.lastIndexOf('\n', pos), fwd = original.indexOf('\n', pos);
+      const cands = [back + 1, fwd + 1].filter((x) => x > 0 && Math.abs(x - pos) <= 60);
+      return cands.length ? cands.sort((x, y) => Math.abs(x - pos) - Math.abs(y - pos))[0] : pos;
+    };
+    const cuts = [0]; let off = 0;
+    for (let k = 0; k < parts.length - 1; k++) { off += parts[k].length + 1; cuts.push(snap(mapPos(off))); }
+    cuts.push(original.length);
+    const out = parts.map((p, k) => original.slice(cuts[k], Math.max(cuts[k], cuts[k + 1])).trim());
+    return out.some((x) => !x) ? parts.slice() : out;
   }
 
   return {
     uid, defaultCategories, DEFAULT_PROMPTS, SCHEMAS, children, subtreeIds, isTodoCat, catPath, assignableCats, todoSubs,
     makeBlocks, groupsFromStarts, blockWindows, parseJSON, fill, protectedTerms, buildSplitPrompt, buildSurveyPrompt,
     buildOrganizePrompt, bulkSplitPrompt, bulkOrganizePrompt, bulkSurveyPrompt, diff, changeRatio, countTerm, checkOrganize,
-    checkSurvey, fmtDate, safeName, categoryMarkdown, allMarkdown, visibleTasks, validBackup,
+    checkSurvey, fmtDate, safeName, categoryMarkdown, allMarkdown, visibleTasks, validBackup, backupProblem, itemsIn, linkedTasks,
+    editDistance, splitOriginal, taskSupport,
   };
 })();
 if (typeof window !== 'undefined') window.MDCore = MDCore;
