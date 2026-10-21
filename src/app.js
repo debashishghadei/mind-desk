@@ -83,27 +83,33 @@
 
   let saveTimer = null, folderTimer = null, saveState = 'saved';
   const LIFE = { ok: false, blocked: false, rev: 0 }; // ok = state loaded safely; blocked = another window took over
-  function save() {
+  function save(opts) {
     if (!LIFE.ok || LIFE.blocked || !S) return; // never write when the load failed or another window is in charge
     saveState = 'saving'; paintSaveState();
     clearTimeout(saveTimer);
     saveTimer = setTimeout(writeState, 250);
+    if (opts && opts.folder === false) return; // folder bookkeeping only: no new folder copy
     clearTimeout(folderTimer);
     folderTimer = setTimeout(syncFolder, 1500);
   }
+  let writing = false, writeAgain = false;
+  /** writes run one at a time, so a slow save cannot be mistaken for another window's save */
   async function writeState() {
     if (!LIFE.ok || LIFE.blocked) return;
-    const next = LIFE.rev + 1; S.rev = next;
+    if (writing) { writeAgain = true; return; }
+    writing = true;
     try {
+      const next = LIFE.rev + 1; S.rev = next;
       const ok = await store.putState(S, LIFE.rev);
-      if (ok) { LIFE.rev = next; saveState = 'saved'; } else { saveState = 'error'; blockWindow('changed'); }
-    } catch (e) { saveState = 'error'; toast('Could not save: ' + e.message + '. Mind Desk will try again with your next change.', 6000); }
+      if (ok) { LIFE.rev = next; saveState = writeAgain ? 'saving' : 'saved'; } else { saveState = 'error'; blockWindow('changed'); }
+    } catch (e) { saveState = 'error'; toast('Could not save: ' + e.message + '. Mind Desk will try again with your next change.', 6000); } finally { writing = false; }
     paintSaveState();
+    if (writeAgain && !LIFE.blocked) { writeAgain = false; writeState(); }
   }
   function paintSaveState() {
     const el = $('#savestate'); if (!el) return;
     const f = FOLDER.handle ? (FOLDER.ok ? ` · folder “${esc(FOLDER.name)}”` : ' · <a href="#" data-act="reconnectFolder">reconnect folder</a>') : '';
-    el.innerHTML = (saveState === 'saved' ? 'Saved' : saveState === 'saving' ? 'Saving…' : '<span style="color:var(--bad)">Not saved</span>') + f;
+    el.innerHTML = (saveState === 'saved' ? 'Saved' : saveState === 'saving' ? 'Saving…' : '<span style="color:var(--bad)">Not saved</span>') + f + (LIFE.noLock ? ' · <span title="Only one Mind Desk window should be open">one-window check off</span>' : '');
   }
 
   /* ================= helpers ================= */
@@ -154,9 +160,11 @@
     numbers: ['bad', 'A number or date changed'],
     negation: ['bad', 'A “not / never / don’t” word disappeared, so the meaning may have flipped'],
     taskcheck: ['warn', 'A task may not match your note. Check the tasks.'],
+    splitguess: ['warn', 'Your original text was divided approximately (very long note). Check “Show my original”.'],
   };
   function flagChips(it) {
-    return (it.flags || []).map((f) => {
+    const sv = it.surveyFailed ? `<span class="chip warn">The questions step failed for this note, so its shortcodes were not checked</span> <button class="btn small" data-act="resurvey" data-id="${esc(it.id)}">Ask questions again</button> ` : '';
+    return sv + (it.flags || []).map((f) => {
       const [cls, txt] = FLAG_TEXT[f] || ['warn', f];
       const extra = f === 'lostword' && it.lost && it.lost.length ? ': ' + it.lost.join(', ') : f === 'aierror' && it.error ? ': ' + it.error : '';
       return `<span class="chip ${cls}">${esc(txt + extra)}</span>`;
@@ -356,7 +364,8 @@
         else { const p = C.buildSurveyPrompt(prompt('survey'), chunks[i].text, ctx()); all = all.concat((await aiJSON('survey', p.system, p.user)).questions || []); }
       } catch (e) { if (e.name === 'AbortError' || e.conn) throw e; chunks[i].items.forEach((it) => failed.add(it)); }
     }
-    if (failed.size) toast(`The questions step failed for ${failed.size} note part(s) (the AI answer was not usable). They are organized without questions.`, 7000);
+    for (const it of items) it.surveyFailed = failed.has(it);
+    if (failed.size) toast(`The questions step failed for ${failed.size} note(s) (the AI answer was not usable). They are marked in Review.`, 7000);
     return C.checkSurvey(all, ctx());
   }
 
@@ -464,8 +473,14 @@
       FOLDER.ok = (await h.queryPermission({ mode: 'readwrite' })) === 'granted';
     } catch (e) { FOLDER.ok = false; }
   }
+  const stillInCharge = () => LIFE.ok && !LIFE.blocked;
+  function stopped() { const e = new Error('another window is in charge'); e.stopped = true; return e; }
+  /** a file only replaces the old one at close(); if this window lost control meanwhile, the write is thrown away */
   async function writeFile(dir, name, content) {
-    const fh = await dir.getFileHandle(name, { create: true }); const w = await fh.createWritable(); await w.write(content); await w.close();
+    if (!stillInCharge()) throw stopped();
+    const fh = await dir.getFileHandle(name, { create: true }); const w = await fh.createWritable(); await w.write(content);
+    if (!stillInCharge()) { try { await w.abort(); } catch (e) { /* ignore */ } throw stopped(); }
+    await w.close();
   }
   async function syncFolder() {
     if (!FOLDER.handle || !FOLDER.ok) return;
@@ -482,7 +497,7 @@
         taken.add(name.toLowerCase()); files.push(name);
         await writeFile(org, name, C.categoryMarkdown(S, c.id));
       }
-      for (const old of S.folderFiles) if (!files.includes(old)) { try { await org.removeEntry(old); } catch (e) { /* gone */ } }
+      for (const old of S.folderFiles) if (!files.includes(old)) { if (!stillInCharge()) throw stopped(); try { await org.removeEntry(old); } catch (e) { /* gone */ } }
       S.folderFiles = files;
       const orig = await root.getDirectoryHandle('Originals', { create: true });
       for (const n of S.notes) {
@@ -490,9 +505,9 @@
         await writeFile(orig, `${new Date(n.addedAt).toISOString().slice(0, 10)} ${C.safeName(n.name)} [${n.id.slice(-6)}].txt`, n.text);
         S.folderOriginals.push(n.id);
       }
-      save();
+      save({ folder: false });
       FOLDER.msg = 'Last saved to folder at ' + new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-    } catch (e) { FOLDER.ok = false; FOLDER.msg = 'Folder save failed: ' + e.message; }
+    } catch (e) { if (e.stopped) return; FOLDER.ok = false; FOLDER.msg = 'Folder save failed: ' + e.message; }
     paintSaveState();
   }
 
@@ -584,14 +599,14 @@
     else if (v === 'words') el.innerHTML = viewWords();
     else if (v === 'settings') el.innerHTML = viewSettings();
     else if (v.startsWith('cat:')) el.innerHTML = cat(v.slice(4)) ? viewCategory(v.slice(4)) : '<div class="empty">This category no longer exists.</div>';
-    if (UI.focus) { const f = $(`[data-item="${UI.focus}"]`); if (f) { f.scrollIntoView({ block: 'center' }); f.style.outline = '2px solid var(--accent)'; } UI.focus = null; }
+    if (UI.focus) { const f = $(`[data-item="${CSS.escape(UI.focus)}"]`); if (f) { f.scrollIntoView({ block: 'center' }); f.style.outline = '2px solid var(--accent)'; } UI.focus = null; }
   }
 
   /* ---------- inbox ---------- */
   function viewInbox() {
     const notes = [...S.notes].sort((a, b) => b.addedAt - a.addedAt);
     if (!notes.find((n) => n.id === UI.selNote)) UI.selNote = notes[0] ? notes[0].id : null;
-    const list = notes.map((n) => `<div class="noteitem${n.id === UI.selNote ? ' on' : ''}" data-act="selNote" data-id="${n.id}">
+    const list = notes.map((n) => `<div class="noteitem${n.id === UI.selNote ? ' on' : ''}" data-act="selNote" data-id="${esc(n.id)}">
         <div class="nm">${esc(n.name)}</div><div class="sub">${NOTE_CHIP[noteStatus(n)]}<span>${esc(C.fmtDate(n.addedAt))}</span></div></div>`).join('');
     const tools = `<div class="tools"><button class="btn" data-act="addFiles">＋ Add files</button><button class="btn" data-act="pasteNote">📋 Paste a note</button></div>`;
     const n = S.notes.find((x) => x.id === UI.selNote);
@@ -603,13 +618,13 @@
     } else {
       const its = S.items.filter((i) => i.noteId === n.id).sort((a, b) => a.order - b.order);
       mid = `<div class="row" style="margin-bottom:10px"><h2 style="margin:0;font-size:16px;flex:1">${esc(n.name)}</h2>
-          <button class="btn small" data-act="renameNote" data-id="${n.id}">Rename</button>
-          ${n.status !== 'new' ? `<button class="btn small" data-act="reorganizeNote" data-id="${n.id}">Organize again</button>` : ''}
-          <button class="btn small danger" data-act="deleteNote" data-id="${n.id}">Delete</button></div>
+          <button class="btn small" data-act="renameNote" data-id="${esc(n.id)}">Rename</button>
+          ${n.status !== 'new' ? `<button class="btn small" data-act="reorganizeNote" data-id="${esc(n.id)}">Organize again</button>` : ''}
+          <button class="btn small danger" data-act="deleteNote" data-id="${esc(n.id)}">Delete</button></div>
         <div class="muted small" style="margin-bottom:8px">Added ${esc(fmtTime(n.addedAt))} · ${n.text.length.toLocaleString()} characters · ${n.source === 'file' ? 'from a file' : 'pasted'}</div>
         <div class="notebody pre">${esc(n.text)}</div>`;
       const st = { pending: '<span class="chip warn">Waiting</span>', review: '<span class="chip warn">To review</span>', approved: '<span class="chip good">Done</span>' };
-      right = `<h2 style="font-size:15px;margin:0 0 10px">What the AI made</h2>` + (its.length ? its.map((i) => `<div class="mini" data-act="openItem" data-id="${i.id}">
+      right = `<h2 style="font-size:15px;margin:0 0 10px">What the AI made</h2>` + (its.length ? its.map((i) => `<div class="mini" data-act="openItem" data-id="${esc(i.id)}">
           <div class="t">${esc(i.title || i.original.slice(0, 60))}</div><div class="row small" style="margin-top:4px">${st[i.status] || ''}${i.status !== 'pending' ? `<span class="muted">${esc(C.catPath(cats(), i.cat))}</span>` : ''}</div></div>`).join('')
         : `<p class="muted">Not organized yet. Press <b>✨ Organize all</b>.</p>`);
     }
@@ -617,23 +632,33 @@
   }
 
   /* ---------- review ---------- */
-  function editorHtml(it) {
+  function captureDraft() {
+    if (!UI.editing || !$('#editor')) return;
+    UI.draft = {
+      id: UI.editing, title: $('#edTitle').value, cat: $('#edCat').value, text: $('#edText').value,
+      tags: $$('[data-tag]').filter((x) => x.checked).map((x) => x.dataset.tag),
+      tasks: $$('#edTasks [data-taskrow]').map((r) => ({ text: $('[data-tf=text]', r).value, done: $('[data-tf=done]', r).checked, cat: $('[data-tf=cat]', r).value })),
+    };
+  }
+  function editorHtml(item) {
+    const d = UI.draft && UI.draft.id === item.id ? UI.draft : null; // unsaved changes win over the stored item
+    const it = d ? Object.assign({}, item, { title: d.title, cat: d.cat, text: d.text, tags: d.tags }) : item;
     const tags = S.categories.filter((c) => !C.isTodoCat(cats(), c.id) && c.id !== 'todo' && c.id !== 'unsorted');
-    const tasks = itemTasks(it.id);
+    const tasks = d ? d.tasks : itemTasks(it.id);
     const subs = C.todoSubs(cats());
     const taskRow = (t) => `<div class="row" data-taskrow style="margin-bottom:6px"><input type="checkbox" data-tf="done" ${t.done ? 'checked' : ''} aria-label="Done">
         <input type="text" data-tf="text" value="${esc(t.text)}" style="flex:1;min-width:200px"><select data-tf="cat">${catOptions(t.cat, subs)}</select>
         <button class="btn small" data-act="rmTaskRow" title="Remove">✕</button></div>`;
-    return `<div class="card" data-item="${it.id}" id="editor">
+    return `<div class="card" data-item="${esc(it.id)}" id="editor">
       <div class="field"><label for="edTitle">Title</label><input type="text" id="edTitle" value="${esc(it.title)}"></div>
       <div class="grid2"><div class="field"><label for="edCat">Category</label><select id="edCat">${catOptions(it.cat)}</select></div>
-        <div class="field"><label>Also show in</label><div class="row">${tags.map((c) => `<label class="small"><input type="checkbox" data-tag="${c.id}" ${it.tags.includes(c.id) ? 'checked' : ''}> ${esc(C.catPath(cats(), c.id))}</label>`).join('')}</div></div></div>
+        <div class="field"><label>Also show in</label><div class="row">${tags.map((c) => `<label class="small"><input type="checkbox" data-tag="${esc(c.id)}" ${it.tags.includes(c.id) ? 'checked' : ''}> ${esc(C.catPath(cats(), c.id))}</label>`).join('')}</div></div></div>
       <div class="field"><label for="edText">Text</label><textarea id="edText" rows="${Math.min(24, it.text.split('\n').length + 3)}">${esc(it.text)}</textarea>
         <span class="hint">Tip: put <code>---</code> on its own line to split this into two items.</span></div>
       <div class="field"><label>Tasks</label><div id="edTasks">${tasks.map(taskRow).join('')}</div>
         <div><button class="btn small" data-act="addTaskRow">＋ Add task</button></div></div>
       <template id="taskRowTpl">${taskRow({ text: '', done: false, cat: subs[0] ? subs[0].id : 'todo' })}</template>
-      <div class="actions"><button class="btn primary" data-act="saveEdit" data-id="${it.id}">Save</button><button class="btn" data-act="cancelEdit">Cancel</button></div></div>`;
+      <div class="actions"><button class="btn primary" data-act="saveEdit" data-id="${esc(it.id)}">Save</button><button class="btn" data-act="cancelEdit">Cancel</button></div></div>`;
   }
   function tasksPreview(it) {
     const ts = itemTasks(it.id); if (!ts.length) return '';
@@ -655,18 +680,18 @@
     for (const it of list) {
       if (UI.editing === it.id) { h += editorHtml(it); continue; }
       const d = diffHtml(it.original, it.text); const n = noteOf(it); const prev = prevInNote(it);
-      h += `<div class="card" data-item="${it.id}">
+      h += `<div class="card" data-item="${esc(it.id)}">
         <div class="itemhead"><div class="grow"><h3>${esc(it.title)}</h3><div class="meta">${esc(n ? n.name : '')} · ${esc(C.fmtDate(it.createdAt))}</div></div>
-          <select data-change="setCat" data-id="${it.id}" aria-label="Category">${catOptions(it.cat)}</select></div>
+          <select data-change="setCat" data-id="${esc(it.id)}" aria-label="Category">${catOptions(it.cat)}</select></div>
         <div class="row" style="margin-top:6px">${it.tags.map((t) => `<span class="chip acc">also: ${esc(C.catPath(cats(), t))}</span>`).join(' ')} ${flagChips(it)}</div>
         <div class="cmp"><div><div class="lbl">Your original</div><div class="pre">${d.left}</div></div><div><div class="lbl">Cleaned by AI</div><div class="pre">${d.right}</div></div></div>
         ${tasksPreview(it)}
-        <div class="actions"><button class="btn primary" data-act="approve" data-id="${it.id}">✓ Approve</button>
-          <button class="btn" data-act="edit" data-id="${it.id}">Edit</button>
-          ${it.text !== it.original ? `<button class="btn" data-act="useOriginal" data-id="${it.id}">Use my original text</button>` : ''}
-          ${prev ? `<button class="btn" data-act="mergePrev" data-id="${it.id}" title="Join with the item above from the same note">Join with previous</button>` : ''}
-          ${S.settings.provider !== 'manual' ? `<button class="btn" data-act="rerun" data-id="${it.id}">Ask AI again</button>` : ''}
-          <button class="btn danger" data-act="deleteItem" data-id="${it.id}">Delete</button></div></div>`;
+        <div class="actions"><button class="btn primary" data-act="approve" data-id="${esc(it.id)}">✓ Approve</button>
+          <button class="btn" data-act="edit" data-id="${esc(it.id)}">Edit</button>
+          ${it.text !== it.original ? `<button class="btn" data-act="useOriginal" data-id="${esc(it.id)}">Use my original text</button>` : ''}
+          ${prev ? `<button class="btn" data-act="mergePrev" data-id="${esc(it.id)}" title="Join with the item above from the same note">Join with previous</button>` : ''}
+          ${S.settings.provider !== 'manual' ? `<button class="btn" data-act="rerun" data-id="${esc(it.id)}">Ask AI again</button>` : ''}
+          <button class="btn danger" data-act="deleteItem" data-id="${esc(it.id)}">Delete</button></div></div>`;
     }
     return h;
   }
@@ -678,11 +703,11 @@
     return `<p class="hint">The AI found ${qs.length} thing(s) it could not understand. Your answers are saved in <b>My words &amp; rules</b> and used every time from now on. Leave a box empty to skip it.</p>
       ${qs.map((q, k) => q.kind === 'word'
     ? `<div class="q"><label for="sq${k}"><b>What does “${esc(q.term)}” mean?</b></label>
-          <div class="row" style="margin-top:6px"><input type="text" id="sq${k}" data-q="${q.id}" value="${esc(draft[q.id] || '')}" style="flex:1;min-width:240px" placeholder="${esc(q.guess ? 'AI guess: ' + q.guess : 'Your meaning')}">
+          <div class="row" style="margin-top:6px"><input type="text" id="sq${k}" data-q="${esc(q.id)}" value="${esc(draft[q.id] || '')}" style="flex:1;min-width:240px" placeholder="${esc(q.guess ? 'AI guess: ' + q.guess : 'Your meaning')}">
           ${q.guess ? `<button class="btn small" data-act="useGuess" data-k="${k}">Use the guess</button>` : ''}
           <button class="btn small" data-act="keepWord" data-k="${k}" title="Not a typo, keep it unchanged">Keep as is</button></div></div>`
     : `<div class="q"><div class="quote">“${esc(q.quote)}”</div><label for="sq${k}"><b>${esc(q.question)}</b></label>
-          <div class="row" style="margin-top:6px"><input type="text" id="sq${k}" data-q="${q.id}" value="${esc(draft[q.id] || '')}" style="flex:1;min-width:240px" placeholder="${esc(q.guess ? 'AI guess: ' + q.guess : 'Your answer')}">
+          <div class="row" style="margin-top:6px"><input type="text" id="sq${k}" data-q="${esc(q.id)}" value="${esc(draft[q.id] || '')}" style="flex:1;min-width:240px" placeholder="${esc(q.guess ? 'AI guess: ' + q.guess : 'Your answer')}">
           ${q.guess ? `<button class="btn small" data-act="useGuess" data-k="${k}">Use the guess</button>` : ''}</div></div>`).join('')}
       <div class="actions"><button class="btn primary" data-act="submitSurvey">Save answers and continue</button><button class="btn" data-act="skipSurvey">Skip questions</button></div>`;
   }
@@ -690,9 +715,9 @@
   /* ---------- to-do ---------- */
   function taskHtml(t) {
     const it = t.itemId ? S.items.find((i) => i.id === t.itemId) : null;
-    return `<div class="todo${t.done ? ' done' : ''}"><input type="checkbox" data-act="toggleTask" data-id="${t.id}" ${t.done ? 'checked' : ''} aria-label="Done">
-      <div class="tx">${esc(t.text)}${it ? `<div class="src">from: <a href="#" data-act="openItem" data-id="${it.id}">${esc(it.title)}</a></div>` : ''}</div>
-      <button class="btn small link" data-act="editTask" data-id="${t.id}">Edit</button><button class="btn small link" data-act="deleteTask" data-id="${t.id}" title="Delete">✕</button></div>`;
+    return `<div class="todo${t.done ? ' done' : ''}"><input type="checkbox" data-act="toggleTask" data-id="${esc(t.id)}" ${t.done ? 'checked' : ''} aria-label="Done">
+      <div class="tx">${esc(t.text)}${it ? `<div class="src">from: <a href="#" data-act="openItem" data-id="${esc(it.id)}">${esc(it.title)}</a></div>` : ''}</div>
+      <button class="btn small link" data-act="editTask" data-id="${esc(t.id)}">Edit</button><button class="btn small link" data-act="deleteTask" data-id="${esc(t.id)}" title="Delete">✕</button></div>`;
   }
   function viewTodo() {
     const q = UI.search.toLowerCase();
@@ -705,7 +730,7 @@
       if (g.id === 'todo' && !open.length && !done.length) continue;
       h += `<div class="todogroup"><h2>${esc(g.id === 'todo' ? 'Other tasks' : g.name)} <span class="chip">${open.length}</span></h2>
         ${open.map(taskHtml).join('')}${UI.showDone ? done.map(taskHtml).join('') : ''}
-        <div class="row"><input type="text" placeholder="Add a task…" data-newtask="${g.id}" style="flex:1;max-width:520px"><button class="btn small" data-act="addTask" data-cat="${g.id}">Add</button></div></div>`;
+        <div class="row"><input type="text" placeholder="Add a task…" data-newtask="${esc(g.id)}" style="flex:1;max-width:520px"><button class="btn small" data-act="addTask" data-cat="${esc(g.id)}">Add</button></div></div>`;
     }
     const notes = S.items.filter((i) => i.status === 'approved' && i.cat === 'todo');
     if (notes.length) h += `<div class="todogroup"><h2>Notes filed under To-do</h2>${notes.map(itemCard).join('')}</div>`;
@@ -716,9 +741,9 @@
   function itemCard(it) {
     if (UI.editing === it.id) return editorHtml(it);
     const n = noteOf(it);
-    return `<div class="card" data-item="${it.id}"><div class="itemhead"><div class="grow"><h3>${esc(it.title)}</h3>
+    return `<div class="card" data-item="${esc(it.id)}"><div class="itemhead"><div class="grow"><h3>${esc(it.title)}</h3>
         <div class="meta">${esc(C.fmtDate(it.createdAt))}${n ? ' · ' + esc(n.name) : ''} · ${esc(C.catPath(cats(), it.cat))}${it.tags.length ? ' · also: ' + esc(it.tags.map((t) => C.catPath(cats(), t)).join(', ')) : ''}</div></div>
-        <button class="btn small" data-act="edit" data-id="${it.id}">Edit</button><button class="btn small danger" data-act="deleteItem" data-id="${it.id}">Delete</button></div>
+        <button class="btn small" data-act="edit" data-id="${esc(it.id)}">Edit</button><button class="btn small danger" data-act="deleteItem" data-id="${esc(it.id)}">Delete</button></div>
       <div class="pre" style="margin-top:8px">${esc(it.text)}</div>${tasksPreview(it)}
       ${it.text !== it.original ? `<details style="margin-top:8px"><summary class="small">Show my original</summary><div class="pre muted" style="margin-top:6px">${esc(it.original)}</div></details>` : ''}</div>`;
   }
@@ -727,7 +752,7 @@
     const kids = C.children(cats(), id);
     let items = itemsIn(id).filter((i) => !q || (i.title + ' ' + i.text).toLowerCase().includes(q)).sort((a, b) => b.createdAt - a.createdAt);
     let h = c.desc ? `<p class="hint" style="margin-top:0">${esc(c.desc)}</p>` : '';
-    if (kids.length) h += `<div class="row" style="margin-bottom:14px">${kids.map((k) => `<button class="btn small" data-act="nav" data-v="cat:${k.id}">${esc(k.name)} (${itemsIn(k.id).length})</button>`).join('')}</div>`;
+    if (kids.length) h += `<div class="row" style="margin-bottom:14px">${kids.map((k) => `<button class="btn small" data-act="nav" data-v="cat:${esc(k.id)}">${esc(k.name)} (${itemsIn(k.id).length})</button>`).join('')}</div>`;
     const linked = C.todoSubs(cats()).filter((s) => s.area === id).map((s) => s.id);
     const tasks = C.visibleTasks(S).filter((t) => linked.includes(t.cat) && !t.done && (!q || t.text.toLowerCase().includes(q)));
     if (tasks.length) h += `<div class="todogroup"><h2>Open tasks <span class="chip">${tasks.length}</span></h2>${tasks.map(taskHtml).join('')}</div>`;
@@ -740,8 +765,8 @@
   function viewWords() {
     return `<div class="box"><h2>My words</h2><p class="hint">Your shortcodes, names and private words. The AI keeps them unchanged and uses the meaning to understand your notes.</p>
       <table class="words"><thead><tr><th style="width:28%">Word</th><th>Meaning</th><th style="width:40px"></th></tr></thead><tbody>
-      ${S.words.map((w) => `<tr><td><input type="text" data-word="${w.id}" data-wf="term" value="${esc(w.term)}" style="width:100%"></td><td><input type="text" data-word="${w.id}" data-wf="meaning" value="${esc(w.meaning)}" style="width:100%"></td>
-        <td><button class="btn small link" data-act="delWord" data-id="${w.id}" title="Delete">✕</button></td></tr>`).join('')}
+      ${S.words.map((w) => `<tr><td><input type="text" data-word="${esc(w.id)}" data-wf="term" value="${esc(w.term)}" style="width:100%"></td><td><input type="text" data-word="${esc(w.id)}" data-wf="meaning" value="${esc(w.meaning)}" style="width:100%"></td>
+        <td><button class="btn small link" data-act="delWord" data-id="${esc(w.id)}" title="Delete">✕</button></td></tr>`).join('')}
       </tbody></table><div style="margin-top:10px"><button class="btn" data-act="addWord">＋ Add word</button></div></div>
       <div class="box"><h2>My rules</h2><p class="hint">Simple rules in your own words, for example: “anything about plugins or sites goes to My business”.</p>
       ${S.rules.map((r, k) => `<div class="row" style="margin-bottom:6px"><input type="text" data-rule="${k}" value="${esc(r)}" style="flex:1"><button class="btn small link" data-act="delRule" data-k="${k}" title="Delete">✕</button></div>`).join('')}
@@ -794,21 +819,21 @@
     const tops = S.categories.filter((c) => !c.parent);
     const parentOpts = (c) => {
       if (c.system || C.children(cats(), c.id).length) return '<option value="">(top level)</option>';
-      return '<option value="">(top level)</option>' + tops.filter((t) => t.id !== c.id && t.id !== 'unsorted').map((t) => `<option value="${t.id}"${c.parent === t.id ? ' selected' : ''}>under ${esc(t.name)}</option>`).join('');
+      return '<option value="">(top level)</option>' + tops.filter((t) => t.id !== c.id && t.id !== 'unsorted').map((t) => `<option value="${esc(t.id)}"${c.parent === t.id ? ' selected' : ''}>under ${esc(t.name)}</option>`).join('');
     };
     const row = (c, child) => {
       const isSub = c.parent === 'todo';
-      return `<div class="catrow${child ? ' child' : ''}"><input type="text" class="nm" data-catf="name" data-id="${c.id}" value="${esc(c.name)}" aria-label="Name">
-        <input type="text" data-catf="desc" data-id="${c.id}" value="${esc(c.desc || '')}" placeholder="What belongs here (helps the AI)" aria-label="Description">
-        ${isSub ? `<select data-catf="area" data-id="${c.id}" title="Also show these tasks in"><option value="">tasks show only in To-do</option>${tops.filter((t) => t.id !== 'todo' && t.id !== 'unsorted').map((t) => `<option value="${t.id}"${c.area === t.id ? ' selected' : ''}>also show in ${esc(t.name)}</option>`).join('')}</select>`
-    : `<select data-catf="parent" data-id="${c.id}" ${c.system ? 'disabled' : ''}>${parentOpts(c)}</select>`}
-        <span class="row" style="gap:2px"><button class="btn small link" data-act="moveCat" data-id="${c.id}" data-d="-1" title="Move up">↑</button><button class="btn small link" data-act="moveCat" data-id="${c.id}" data-d="1" title="Move down">↓</button>
-        ${c.system ? '' : `<button class="btn small link" data-act="delCat" data-id="${c.id}" title="Delete">✕</button>`}</span></div>`;
+      return `<div class="catrow${child ? ' child' : ''}"><input type="text" class="nm" data-catf="name" data-id="${esc(c.id)}" value="${esc(c.name)}" aria-label="Name">
+        <input type="text" data-catf="desc" data-id="${esc(c.id)}" value="${esc(c.desc || '')}" placeholder="What belongs here (helps the AI)" aria-label="Description">
+        ${isSub ? `<select data-catf="area" data-id="${esc(c.id)}" title="Also show these tasks in"><option value="">tasks show only in To-do</option>${tops.filter((t) => t.id !== 'todo' && t.id !== 'unsorted').map((t) => `<option value="${esc(t.id)}"${c.area === t.id ? ' selected' : ''}>also show in ${esc(t.name)}</option>`).join('')}</select>`
+    : `<select data-catf="parent" data-id="${esc(c.id)}" ${c.system ? 'disabled' : ''}>${parentOpts(c)}</select>`}
+        <span class="row" style="gap:2px"><button class="btn small link" data-act="moveCat" data-id="${esc(c.id)}" data-d="-1" title="Move up">↑</button><button class="btn small link" data-act="moveCat" data-id="${esc(c.id)}" data-d="1" title="Move down">↓</button>
+        ${c.system ? '' : `<button class="btn small link" data-act="delCat" data-id="${esc(c.id)}" title="Delete">✕</button>`}</span></div>`;
     };
     let h = '';
     for (const t of tops) { h += row(t, false); for (const k of C.children(cats(), t.id)) h += row(k, true); }
     return `<div class="box"><h2>Categories</h2><p class="hint">Rename, describe, move or add. Good descriptions help the AI choose.</p>${h}
-      <div class="row" style="margin-top:12px"><input type="text" id="newCatName" placeholder="New category name"><select id="newCatParent"><option value="">(top level)</option>${tops.filter((t) => t.id !== 'unsorted').map((t) => `<option value="${t.id}">under ${esc(t.name)}</option>`).join('')}</select><button class="btn" data-act="addCat">＋ Add</button></div></div>`;
+      <div class="row" style="margin-top:12px"><input type="text" id="newCatName" placeholder="New category name"><select id="newCatParent"><option value="">(top level)</option>${tops.filter((t) => t.id !== 'unsorted').map((t) => `<option value="${esc(t.id)}">under ${esc(t.name)}</option>`).join('')}</select><button class="btn" data-act="addCat">＋ Add</button></div></div>`;
   }
   function promptEditor() {
     const names = { split: 'Step 1: split notes', survey: 'Step 2: questions', organize: 'Step 3: organize' };
@@ -883,10 +908,10 @@
       if (!window.confirm(`Approve ${list.length} item(s)?${warn ? `\n${warn} of them have warnings.` : ''}`)) return;
       list.forEach((i) => { i.status = 'approved'; i.updatedAt = Date.now(); }); save(); render();
     },
-    edit(el) { if (UI.editing !== el.dataset.id && !leaveEditor()) return; UI.editing = el.dataset.id; UI.dirty = false; renderContent(); const ed = $('#editor'); if (ed) ed.scrollIntoView({ block: 'nearest' }); },
-    cancelEdit() { UI.editing = null; UI.dirty = false; renderContent(); },
-    addTaskRow() { const tpl = $('#taskRowTpl'); $('#edTasks').appendChild(tpl.content.cloneNode(true)); },
-    rmTaskRow(el) { el.closest('[data-taskrow]').remove(); },
+    edit(el) { if (UI.editing === el.dataset.id) return; if (!leaveEditor()) return; UI.editing = el.dataset.id; UI.dirty = false; UI.draft = null; renderContent(); const ed = $('#editor'); if (ed) ed.scrollIntoView({ block: 'nearest' }); },
+    cancelEdit() { UI.editing = null; UI.dirty = false; UI.draft = null; renderContent(); },
+    addTaskRow() { const tpl = $('#taskRowTpl'); $('#edTasks').appendChild(tpl.content.cloneNode(true)); UI.dirty = true; captureDraft(); },
+    rmTaskRow(el) { el.closest('[data-taskrow]').remove(); UI.dirty = true; captureDraft(); },
     saveEdit(el) {
       const it = S.items.find((i) => i.id === el.dataset.id);
       it.title = $('#edTitle').value.trim() || it.title; it.cat = $('#edCat').value;
@@ -901,10 +926,11 @@
         const n = { id: C.uid('i'), noteId: it.noteId, order: it.order + k / 100, original: origs[k] || parts[k], text: parts[k], title: it.title + ` (part ${k + 1})`, cat: it.cat, tags: [...it.tags], status: it.status, flags: [], lost: [], surveyed: true, createdAt: it.createdAt, updatedAt: Date.now() };
         S.items.push(n);
       }
+      if (parts.length > 1 && origs.approx) S.items.filter((x) => x.id === it.id || (x.noteId === it.noteId && x.order > it.order && x.order < it.order + 1)).forEach((x) => { if (!x.flags.includes('splitguess')) x.flags.push('splitguess'); });
       if (parts.length > 1) toast(`Split into ${parts.length} items.`);
-      UI.editing = null; UI.dirty = false; save(); render();
+      UI.editing = null; UI.dirty = false; UI.draft = null; save(); render();
     },
-    useOriginal(el) { const it = S.items.find((i) => i.id === el.dataset.id); it.text = it.original; it.flags = it.flags.filter((f) => !['shortened', 'bigchange', 'lostword', 'notext'].includes(f)); save(); renderContent(); },
+    useOriginal(el) { const it = S.items.find((i) => i.id === el.dataset.id); it.text = it.original; it.flags = it.flags.filter((f) => !['shortened', 'bigchange', 'lostword', 'notext', 'numbers', 'negation'].includes(f)); it.lost = []; save(); renderContent(); },
     mergePrev(el) {
       if (busy()) return;
       const it = S.items.find((i) => i.id === el.dataset.id); const prev = prevInNote(it); if (!prev) return;
@@ -919,22 +945,32 @@
       RUN.active = true; RUN.stop = false; paintTop(); setProgress('Asking AI again', 0, 0);
       try { await organizeOne(it); toast('Updated.'); } catch (e) { if (e.name !== 'AbortError') showError(e); } finally { RUN.active = false; UI.focus = it.id; save(); render(); }
     },
+    async resurvey(el) {
+      if (busy()) return;
+      const it = S.items.find((i) => i.id === el.dataset.id); if (!it) return;
+      RUN.active = true; RUN.stop = false; paintTop(); setProgress('Reading the note for questions', 0, 0);
+      try {
+        const qs = await runSurvey([it]); save();
+        if (it.surveyFailed) toast('The questions step failed again. You can still edit the note yourself.');
+        else if (qs.length) { S.survey = { questions: qs, createdAt: Date.now() }; UI.view = 'survey'; toast('Answer the questions, then use “Ask AI again” on the note.', 6000); } else toast('No questions this time.');
+      } catch (e) { if (e.name !== 'AbortError') showError(e); } finally { RUN.active = false; save(); render(); }
+    },
     deleteItem(el) { if (busy()) return; if (!window.confirm('Delete this item and its tasks? (Your original note stays in the Inbox.)')) return; removeItems([el.dataset.id]); save(); render(); },
     flaggedOnly(el) { UI.flaggedOnly = el.checked; renderContent(); },
     toggleTask(el) { const t = S.tasks.find((x) => x.id === el.dataset.id); t.done = el.checked; t.doneAt = t.done ? Date.now() : null; save(); render(); },
     editTask(el) { const t = S.tasks.find((x) => x.id === el.dataset.id); const v = window.prompt('Task', t.text); if (v && v.trim()) { t.text = v.trim(); save(); renderContent(); } },
     deleteTask(el) { S.tasks = S.tasks.filter((t) => t.id !== el.dataset.id); save(); render(); },
     addTask(el) {
-      const inp = $(`[data-newtask="${el.dataset.cat}"]`); const v = inp.value.trim(); if (!v) return;
+      const inp = $(`[data-newtask="${CSS.escape(el.dataset.cat)}"]`); const v = inp.value.trim(); if (!v) return;
       S.tasks.push({ id: C.uid('t'), itemId: null, text: v, done: false, cat: el.dataset.cat, createdAt: Date.now() }); save(); render();
-      const again = $(`[data-newtask="${el.dataset.cat}"]`); if (again) again.focus();
+      const again = $(`[data-newtask="${CSS.escape(el.dataset.cat)}"]`); if (again) again.focus();
     },
     toggleShowDone(el) { UI.showDone = el.checked; renderContent(); },
     useGuess(el) { const q = S.survey.questions[+el.dataset.k]; $('#sq' + el.dataset.k).value = q.guess; draftAnswer(q.id, q.guess); },
     keepWord(el) { const q = S.survey.questions[+el.dataset.k]; $('#sq' + el.dataset.k).value = '(keep as is)'; draftAnswer(q.id, '(keep as is)'); },
     submitSurvey() {
       for (const q of S.survey.questions) {
-        const v = ($(`[data-q="${q.id}"]`) || {}).value; if (!v || !v.trim()) continue;
+        const v = ($(`[data-q="${CSS.escape(q.id)}"]`) || {}).value; if (!v || !v.trim()) continue;
         if (q.kind === 'word') {
           const ex = S.words.find((w) => w.term.toLowerCase() === q.term.toLowerCase());
           const meaning = v.trim() === '(keep as is)' ? '' : v.trim();
@@ -1012,6 +1048,15 @@
     exportJSON() { download(`mind-desk-backup-${today()}.json`, JSON.stringify(exportObj(), null, 1), 'application/json'); },
     importJSON() { if (busy()) return; $('#importInput').click(); },
     downloadMD() { download(`mind-desk-${today()}.md`, C.allMarkdown(S), 'text/markdown'); },
+    recoveryDownload() { const r = UI.recovery; if (!r) return; const o = JSON.parse(JSON.stringify(r.state)); if (o.settings) delete o.settings.oaKey; o.app = 'mind-desk'; download(`mind-desk-unsaved-copy-${today()}.json`, JSON.stringify(o, null, 1), 'application/json'); },
+    recoveryRestore() {
+      if (busy()) return; const r = UI.recovery; if (!r) return;
+      const o = Object.assign({ app: 'mind-desk' }, JSON.parse(JSON.stringify(r.state))); const problem = C.backupProblem(o);
+      if (problem) { showError(new Error('That copy cannot be used: ' + problem)); return; }
+      if (!window.confirm(`Replace everything here with the unsaved copy from ${fmtTime(r.at)}?\nChanges made here since then will be lost (download a backup first if unsure).`)) return;
+      S = migrate(o); UI.recovery = null; store.del('recovery'); applyTheme(); UI.view = 'inbox'; save(); render(); paintNotice(); toast('The unsaved copy is back.');
+    },
+    async recoveryDismiss() { if (!window.confirm('Delete the unsaved copy from the other window? It cannot be brought back.')) return; await store.del('recovery'); UI.recovery = null; paintNotice(); },
     deleteAll() {
       if (busy()) return;
       if (!window.confirm('Delete ALL notes, items, tasks, words and settings in Mind Desk?\nMake a backup first if you are not sure.')) return;
@@ -1022,7 +1067,7 @@
   function leaveEditor() {
     if (!UI.editing || !UI.dirty) return true;
     if (!window.confirm('You have changes in the editor that are not saved. Leave without saving them?')) return false;
-    UI.editing = null; UI.dirty = false; return true;
+    UI.editing = null; UI.dirty = false; UI.draft = null; return true;
   }
   function setConn(html) { UI.connResult = html; const el = $('#connResult'); if (el) el.innerHTML = html; }
   function removeItems(ids) {
@@ -1049,7 +1094,7 @@
     });
     document.addEventListener('change', (e) => {
       const el = e.target;
-      if (el.closest && el.closest('#editor')) { UI.dirty = true; return; }
+      if (el.closest && el.closest('#editor')) { UI.dirty = true; captureDraft(); return; }
       if (el.dataset.set) {
         const k = el.dataset.set; let v = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value;
         if (el.type === 'radio') v = el.value;
@@ -1075,7 +1120,7 @@
     document.addEventListener('input', (e) => {
       if (e.target.id === 'search') { UI.search = e.target.value; renderContent(); return; }
       if (e.target.dataset && e.target.dataset.q) { draftAnswer(e.target.dataset.q, e.target.value); return; }
-      if (e.target.closest && e.target.closest('#editor')) UI.dirty = true;
+      if (e.target.closest && e.target.closest('#editor')) { UI.dirty = true; captureDraft(); }
     });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && $('#overlay') && !$('#mpPrompt')) closeModal();
@@ -1118,38 +1163,64 @@
   }
   /** another window is in charge (or saved newer data): stop writing, offer to take over */
   function blockWindow(reason) {
+    const unsaved = LIFE.ok && S && (saveState !== 'saved' || UI.dirty);
     LIFE.blocked = true; clearTimeout(saveTimer); clearTimeout(folderTimer);
+    if (unsaved) { // keep this window's work where the other window can find it (separate from the main data)
+      store.set('recovery', { at: Date.now(), state: JSON.parse(JSON.stringify(S)) }).catch(() => {});
+    }
     RUN.stop = true; if (RUN.ctrl) RUN.ctrl.abort(); if (RUN.manualReject) RUN.manualReject(); if (RUN.surveyWait) RUN.surveyWait.reject(abortErr());
     const text = reason === 'changed'
       ? 'Your notes were changed in another Mind Desk window. To avoid overwriting them, this window stopped saving.'
       : 'Mind Desk is open in another window or tab. Only one window can work at a time, so nothing gets overwritten.';
     const o = screen(`<h2>Mind Desk is open somewhere else</h2><p>${text}</p>
-      <div class="actions"><button class="btn primary" id="takeOver">Use Mind Desk here</button></div>
+      ${unsaved ? '<p class="banner">This window had changes that were not saved yet. A copy was kept: the other window offers it, or download it here.</p>' : ''}
+      <div class="actions"><button class="btn primary" id="takeOver">Use Mind Desk here</button>${S ? '<button class="btn" id="dlCopy">Download this window’s copy</button>' : ''}</div>
       <p class="muted small">The other window will then stop and show this message.</p>`, 'data-blocked');
     $('#takeOver', o).onclick = takeOver;
+    if ($('#dlCopy', o)) $('#dlCopy', o).onclick = () => download(`mind-desk-window-copy-${today()}.json`, JSON.stringify(exportObj(), null, 1), 'application/json');
   }
   function tryLock(steal) {
-    if (!navigator.locks) return Promise.resolve(true);
+    if (!navigator.locks || typeof navigator.locks.request !== 'function') { LIFE.noLock = true; return Promise.resolve(true); }
     return new Promise((resolve) => {
-      navigator.locks.request('mind-desk-window', steal ? { steal: true } : { ifAvailable: true }, (lock) => {
-        if (!lock) { resolve(false); return null; }
-        resolve(true); return new Promise(() => {}); // hold the lock while this window is open
-      }).catch(() => { if (!LIFE.blocked) blockWindow('other'); }); // another window took over
+      let held = false;
+      let req;
+      try {
+        req = navigator.locks.request('mind-desk-window', steal ? { steal: true } : { ifAvailable: true }, (lock) => {
+          if (!lock) { resolve(false); return null; }
+          held = true; LIFE.noLock = false; resolve(true); return new Promise(() => {}); // hold the lock while this window is open
+        });
+      } catch (e) { req = Promise.reject(e); }
+      Promise.resolve(req).catch(() => {
+        if (held) { if (!LIFE.blocked) blockWindow('other'); return; } // another window took over
+        LIFE.noLock = true; resolve(true); // the lock feature failed: carry on, the save check still protects the data
+      });
     });
+  }
+  /** a copy kept by a window that lost control with unsaved changes */
+  async function checkRecovery() {
+    if (!LIFE.ok || LIFE.blocked) return;
+    let rec; try { rec = await store.get('recovery'); } catch (e) { return; }
+    UI.recovery = rec && rec.state ? rec : null; paintNotice();
+  }
+  function paintNotice() {
+    const el = $('#notice'); if (!el) return;
+    const r = UI.recovery;
+    el.innerHTML = r ? `<div class="banner" style="margin:12px 20px 0">Another Mind Desk window had changes that were not saved (copy from ${esc(fmtTime(r.at))}: ${r.state.notes.length} notes, ${r.state.items.length} items).
+      <div class="row" style="margin-top:6px"><button class="btn small" data-act="recoveryDownload">Download that copy</button><button class="btn small" data-act="recoveryRestore">Use that copy instead</button><button class="btn small" data-act="recoveryDismiss">Delete that copy</button></div></div>` : '';
   }
   async function takeOver() {
     await tryLock(true);
     const b = $('#blocker'); if (b) b.remove(); const app = $('.app'); if (app) app.inert = false;
     LIFE.blocked = false;
     if (!wired) { wire(); wired = true; }
-    await loadState();
+    if (await loadState()) { await initFolder(); paintSaveState(); }
   }
   async function loadState() {
     let raw;
     try { raw = await store.get('state'); } catch (e) { LIFE.ok = false; fatal('Could not read your saved notes', 'The browser storage did not answer (' + ((e && e.message) || e) + ').'); return false; }
     S = migrate(raw); LIFE.rev = (raw && raw.rev) || 0; LIFE.ok = true; RUN.stop = false;
-    UI.editing = null; UI.dirty = false;
-    applyTheme(); render();
+    UI.editing = null; UI.dirty = false; UI.draft = null;
+    applyTheme(); render(); checkRecovery();
     if (S.survey) toast('The AI has questions for you. Open “Questions for you”.', 5000);
     return true;
   }
@@ -1163,6 +1234,7 @@
     if (!(await loadState())) return;
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
     await initFolder(); paintSaveState();
+    window.addEventListener('focus', checkRecovery);
   }
   start();
 })();

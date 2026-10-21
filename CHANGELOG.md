@@ -2,6 +2,26 @@
 
 All notable changes to Mind Desk. Versions follow semantic versioning.
 
+## 1.0.2 — 2026-10-21
+
+Fixes from ChatGPT's review of 1.0.1 (points S1–S17, each confirmed by a test that fails on 1.0.1).
+
+- Saves run one at a time, so a slow save no longer makes the window block itself (S1).
+- A window that loses control while it has unsaved changes keeps a copy; the window in charge offers "Download that copy / Use that copy instead / Delete that copy", and the stopped window can download its copy (S2).
+- Folder saving no longer repeats every 1.5 seconds when nothing changes (S3).
+- A window that lost control throws away a folder write it had started instead of finishing it over newer files (S4).
+- After "Use Mind Desk here", the saved folder connection is picked up (S5).
+- Backup check also covers open questions, drafts, AI instructions, settings, words, item details, built-in categories and task links (S6); ids may only use simple characters, and every id shown in the page is escaped — a crafted backup could run code in 1.0.1 (S7).
+- Splitting with `---` lines up the original words even with typos ("mov eon" ↔ "move on"); very long notes get an approximate cut taken from the original, marked with a warning — cleaned text is never called "original" (S8).
+- Unsaved editor changes survive other buttons (warning filter, approving another card, search) (S9).
+- Long notes: unchanged text gives no warning; the comparison works line by line and shows only the real changes (S10).
+- Numbers are compared in order; "not"-words are compared per line with the word after them, so added, removed or moved "not" is caught; "dont"/"nto"/curly apostrophes and "2day" do not cause warnings (S11, S14).
+- "Done" is judged per task from the part of the note it comes from; "not done" stays open (S12).
+- Task check: most of a task's words must be in the note (short forms like "ppt" count); "not" elsewhere in the sentence no longer causes a false warning (S13).
+- "Use my original" also clears number and "not" warnings (S15).
+- A failed questions step stays marked on the note after reloading, with "Ask questions again" (S16).
+- If the browser's window-lock feature fails, Mind Desk still starts (the save check protects the data) and shows "one-window check off" (S17).
+
 ## 1.0.1 — 2026-10-21
 
 Fixes from ChatGPT's review of 1.0.0 (each point checked with a test that fails on 1.0.0 first; see the test report).

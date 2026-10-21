@@ -164,6 +164,7 @@ ol.steps li{margin-bottom:6px}
   </aside>
   <main class="main">
     <header class="top" id="top"></header>
+    <div id="notice"></div>
     <section class="content" id="content"><div class="empty">Loading…</div></section>
   </main>
 </div>
@@ -359,7 +360,7 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
   function protectedTerms(text, words) {
     const set = new Set();
     for (const w of words) if (w.term && new RegExp('(^|[^\\w])' + reEsc(w.term) + '(?![\\w])').test(text)) set.add(w.term);
-    for (const m of String(text).matchAll(/\b[A-Z][A-Z0-9]{1,5}\b/g)) set.add(m[0]);
+    for (const m of String(text).matchAll(/\b[A-Z][A-Z0-9]{1,5}\b/g)) if (!new RegExp('^' + NEG_SRC + '$', 'i').test(m[0])) set.add(m[0]); // "CANT", "NOT" are words, not codes
     for (const m of String(text).matchAll(/(?:https?:\/\/|www\.)[^\s<>"]+|[\w.+-]+@[\w-]+\.[\w.-]+/g)) set.add(m[0].replace(/[.,;:!?)]+$/, ''));
     return [...set];
   }
@@ -399,37 +400,57 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
   /* ---------- checking AI results ---------- */
   function words(s) { return String(s).split(/\s+/).filter(Boolean); }
 
-  /** word-level diff (LCS). returns [{t:'eq'|'del'|'ins', s}] */
-  function diff(a, b) {
-    const A = String(a).split(/(\s+)/), B = String(b).split(/(\s+)/);
-    const n = A.length, m = B.length;
-    if (n * m > 4e6) return [{ t: 'del', s: a }, { t: 'ins', s: b }];
-    const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
-    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-    const out = []; let i = 0, j = 0;
-    const push = (t, s) => { const l = out[out.length - 1]; if (l && l.t === t) l.s += s; else out.push({ t, s }); };
-    while (i < n && j < m) {
-      if (A[i] === B[j]) { push('eq', A[i]); i++; j++; } else if (dp[i + 1][j] >= dp[i][j + 1]) { push('del', A[i]); i++; } else { push('ins', B[j]); j++; }
+  /** LCS on token arrays after trimming the common start and end (so one small change in a long text is cheap) */
+  function lcsOps(A, B, limit) {
+    let s = 0; while (s < A.length && s < B.length && A[s] === B[s]) s++;
+    let e = 0; while (e < A.length - s && e < B.length - s && A[A.length - 1 - e] === B[B.length - 1 - e]) e++;
+    const a = A.slice(s, A.length - e), b = B.slice(s, B.length - e);
+    const ops = A.slice(0, s).map((x) => ['eq', x]);
+    const n = a.length, m = b.length;
+    if (n * m > limit) { a.forEach((x) => ops.push(['del', x])); b.forEach((x) => ops.push(['ins', x])); } else {
+      const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+      for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      let i = 0, j = 0;
+      while (i < n && j < m) { if (a[i] === b[j]) { ops.push(['eq', a[i]]); i++; j++; } else if (dp[i + 1][j] >= dp[i][j + 1]) ops.push(['del', a[i++]]); else ops.push(['ins', b[j++]]); }
+      while (i < n) ops.push(['del', a[i++]]); while (j < m) ops.push(['ins', b[j++]]);
     }
-    while (i < n) push('del', A[i++]);
-    while (j < m) push('ins', B[j++]);
+    A.slice(A.length - e).forEach((x) => ops.push(['eq', x]));
+    return ops;
+  }
+  /** word-level diff for display: lines first, then words inside changed lines. returns [{t:'eq'|'del'|'ins', s}] */
+  function diff(a, b) {
+    a = String(a); b = String(b);
+    if (a === b) return a ? [{ t: 'eq', s: a }] : [];
+    const out = []; const push = (t, s) => { if (!s) return; const l = out[out.length - 1]; if (l && l.t === t) l.s += s; else out.push({ t, s }); };
+    const L = (x) => x.match(/[^\n]*\n|[^\n]+$/g) || [];
+    const lines = lcsOps(L(a), L(b), 4e6);
+    let dels = [], inss = [];
+    const flush = () => {
+      if (dels.length || inss.length) {
+        for (const [t, s] of lcsOps(dels.join('').split(/(\s+)/).filter((x) => x !== ''), inss.join('').split(/(\s+)/).filter((x) => x !== ''), 4e6)) push(t, s);
+      }
+      dels = []; inss = [];
+    };
+    for (const [t, s] of lines) { if (t === 'eq') { flush(); push('eq', s); } else if (t === 'del') dels.push(s); else inss.push(s); }
+    flush();
     return out;
   }
   function changeRatio(a, b) {
     const wa = words(a), wb = words(b); if (!wa.length) return 0;
-    const n = wa.length, m = wb.length;
-    if (n * m > 4e6) return 1;
-    const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
-    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = wa[i] === wb[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-    return 1 - dp[0][0] / Math.max(n, m);
+    const ops = lcsOps(wa, wb, 1e7);
+    return 1 - ops.filter((o) => o[0] === 'eq').length / Math.max(wa.length, wb.length);
   }
   function countTerm(text, term) {
     const re = new RegExp('(^|[^\\w])' + reEsc(term) + '(?![\\w])', 'g');
     return (String(text).match(re) || []).length;
   }
-  /** character edit distance (Levenshtein), two rows; null when too long to compute quickly */
+  /** character edit distance (Levenshtein) after trimming the common start/end; null when still too long */
   function editDistance(a, b) {
     a = String(a); b = String(b);
+    let s = 0; while (s < a.length && s < b.length && a[s] === b[s]) s++;
+    let e = 0; while (e < a.length - s && e < b.length - s && a[a.length - 1 - e] === b[b.length - 1 - e]) e++;
+    a = a.slice(s, a.length - e); b = b.slice(s, b.length - e);
+    if (!a.length || !b.length) return Math.max(a.length, b.length);
     if (a.length * b.length > 1.6e7) return null;
     let prev = new Uint32Array(b.length + 1), cur = new Uint32Array(b.length + 1);
     for (let j = 0; j <= b.length; j++) prev[j] = j;
@@ -440,18 +461,77 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     }
     return prev[b.length];
   }
-  const NEG = /\b(not|no|never|nothing|none|don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|can'?t|cannot|couldn'?t|isn'?t|aren'?t|wasn'?t|weren'?t|shouldn'?t|mustn'?t|haven'?t|hasn'?t|nahi|nahin|mat)\b/gi;
-  const DONE = /(\b(done|did|finished|completed?|already|sent|paid|bought|called)\b|\(done|✓|✔|\[x\])/i;
-  const STOP = new Set(['the', 'and', 'for', 'with', 'about', 'from', 'that', 'this', 'into', 'your', 'my', 'some', 'more', 'have', 'will', 'then', 'also', 'make', 'call', 'buy', 'get', 'do', 'to', 'of', 'on', 'in', 'a', 'an']);
-  const numbersOf = (t) => (String(t).match(/\d+(?:[.,:/]\d+)*/g) || []).sort().join('|');
-  const contentWords = (t) => (String(t).toLowerCase().match(/[a-z0-9]{3,}/g) || []).filter((w) => !STOP.has(w));
-  /** does the note support this task? (shares a word; the line it comes from is not negated) */
+  /** characters changed between two texts, measured line by line (fast for long notes). {dist, len} */
+  function charChange(a, b) {
+    a = String(a); b = String(b);
+    if (a === b) return { dist: 0, len: a.length };
+    const ops = lcsOps(a.split('\n'), b.split('\n'), 4e6);
+    let dist = 0, dels = [], inss = [];
+    const flush = () => {
+      const n = Math.max(dels.length, inss.length);
+      for (let k = 0; k < n; k++) {
+        const x = dels[k] || '', y = inss[k] || '';
+        const d = editDistance(x, y);
+        dist += d === null ? Math.round(changeRatio(x, y) * Math.max(x.length, y.length)) : d;
+      }
+      dels = []; inss = [];
+    };
+    for (const [t, s] of ops) { if (t === 'eq') flush(); else if (t === 'del') dels.push(s); else inss.push(s); }
+    flush();
+    return { dist, len: Math.max(a.length, b.length, 1) };
+  }
+
+  /* --- meaning checks --- */
+  const quotes = (t) => String(t).replace(/[’‘`´]/g, "'");
+  const NEG_SRC = "\\b(not|nto|no|never|nothing|none|don'?t|dnt|doesn'?t|didn'?t|won'?t|wouldn'?t|can'?t|cannot|couldn'?t|isn'?t|aren'?t|wasn'?t|weren'?t|shouldn'?t|mustn'?t|haven'?t|hasn'?t|nahi|nahin|mat)\\b";
+  const NEG = new RegExp(NEG_SRC, 'gi');
+  const hasNeg = (t) => new RegExp(NEG_SRC, 'i').test(quotes(t));
+  /** where the "not"-words are: per line, each with the first letter of the word after it */
+  function negSigns(text) {
+    return quotes(text).split('\n').map((ln) => {
+      const out = []; const re = new RegExp(NEG_SRC + "\\W*([A-Za-z0-9]?)", 'gi'); let m;
+      while ((m = re.exec(ln))) out.push((m[2] || '').toLowerCase());
+      return out.sort().join(',');
+    });
+  }
+  function negationChanged(a, b) {
+    const x = negSigns(a), y = negSigns(b);
+    if (x.length === y.length) return x.some((v, k) => v !== y[k]);
+    return x.filter(Boolean).join('|').split(/[|,]/).sort().join() !== y.filter(Boolean).join('|').split(/[|,]/).sort().join();
+  }
+  // numbers in order; "2day", "b2b" or "4u" are words, not numbers; 14th, 10k, 1L, 50% are numbers
+  const numbersOf = (t) => (String(t).match(/(?<![A-Za-z0-9])\d+(?:[.,:/]\d+)*(?:st|nd|rd|th|k|K|L|cr|%)?(?![A-Za-z0-9])/g) || []).join('|');
+  const DONE = /(\b(done|did|finished|completed?|already|sent|paid|bought|called|ho gaya|hogaya)\b|\(done|✓|✔|\[x\])/i;
+  const NOT_DONE = /\b(not|nto|nahi)\s+(yet\s+)?(done|finished|completed?|sent|paid)\b|\bpending\b|\b(not\s+yet|yet\s+to)\b/i;
+  const STOP = new Set(['the', 'and', 'or', 'for', 'with', 'about', 'from', 'that', 'this', 'into', 'your', 'my', 'his', 'her', 'it', 'its', 'some', 'more', 'also', 'then', 'to', 'of', 'on', 'in', 'at', 'a', 'an', 'is', 'be', 'by', 'please', 'need', 'needs', 'will', 'should', 'must', 'can']);
+  const wordsLower = (t) => (quotes(t).toLowerCase().match(/[a-z0-9]+/g) || []);
+  const contentWords = (t) => wordsLower(t).filter((w) => w.length >= 2 && !STOP.has(w));
+  const clauses = (t) => quotes(t).split(/[\n;,]|\.{2,}|\.\s+|\s+-\s+/).map((x) => x.trim()).filter(Boolean);
+  /** same word, a typo of it, a longer form ("call"/"called") or a short form ("ppt" for "powerpoint") */
+  function wordMatch(w, n) {
+    if (w === n) return true;
+    if (w.length >= 4 && n.length >= 4 && w.slice(0, 4) === n.slice(0, 4)) return true;
+    const d = editDistance(w, n); if (d !== null && d <= (Math.max(w.length, n.length) >= 6 ? 2 : 1) && Math.min(w.length, n.length) >= 3) return true;
+    const isAbbr = (s, l) => s.length >= 2 && s.length < l.length && s[0] === l[0] && [...s].every(((i) => (c) => (i = l.indexOf(c, i) + 1) > 0)(0));
+    return isAbbr(n, w) || isAbbr(w, n);
+  }
+  /** clauses of the note that talk about this task (share at least one of its words) */
+  function taskClauses(task, note) {
+    const tw = contentWords(task);
+    return clauses(note).filter((c) => contentWords(c).some((n) => tw.some((w) => wordMatch(w, n))));
+  }
+  /** does the note support this task? Most of its words are in the note, and the note does not say "not" about it */
   function taskSupport(task, original, fixed) {
-    const tw = contentWords(task).map((w) => w.slice(0, 4));
-    if (!tw.length) return true;
-    const lines = (original + '\n' + fixed).split('\n').filter((ln) => contentWords(ln).some((w) => tw.includes(w.slice(0, 4))));
-    if (!lines.length) return false;
-    return !lines.every((ln) => { NEG.lastIndex = 0; return NEG.test(ln); });
+    const tw = contentWords(task); if (!tw.length) return true;
+    const nw = contentWords(original + ' ' + fixed);
+    const found = tw.filter((w) => nw.some((n) => wordMatch(w, n))).length;
+    if (found / tw.length < 0.75) return false;
+    const cl = taskClauses(task, original);
+    return !cl.length || !cl.every(hasNeg);
+  }
+  /** a task counts as done only if the part of the note it comes from says so */
+  function taskDone(task, original) {
+    return taskClauses(task, original).some((c) => DONE.test(c) && !NOT_DONE.test(c));
   }
 
   /** clean an organize answer and decide which warnings to show */
@@ -473,12 +553,12 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     const area = (id) => { const c = todoSubs(cats).find((s) => s.area && subtreeIds(cats, s.area).includes(id)); return c ? c.id : null; };
     let taskWarn = false;
     const tasks = (Array.isArray(r.tasks) ? r.tasks : []).filter((t) => t && String(t.text || '').trim()).map((t) => {
-      const text = String(t.text).trim().slice(0, 300);
-      if (!taskSupport(text, original, typeof r.text === 'string' ? r.text : '')) taskWarn = true;
+      const ttext = String(t.text).trim().slice(0, 300);
+      if (!taskSupport(ttext, original, text)) taskWarn = true;
       return {
-        text,
-        // "done" needs a sign in the note itself; otherwise the task stays open
-        done: (t.done === true || t.done === 'true') && DONE.test(original),
+        text: ttext,
+        // "done" needs a sign in the part of the note this task comes from; otherwise the task stays open
+        done: (t.done === true || t.done === 'true') && taskDone(ttext, original),
         cat: subs.includes(t.category) ? t.category : (area(category) || subs[0] || 'todo'),
       };
     });
@@ -487,13 +567,13 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     if (!title) title = words(text).slice(0, 7).join(' ');
     // guardrails: the typo fix must not change meaning
     const wo = words(original).length, wt = words(text).length;
-    const norm = (t) => String(t).toLowerCase().replace(/\s+/g, ' ').trim();
+    const norm = (t) => quotes(t).toLowerCase().replace(/[ \t]+/g, ' ').trim();
     const a = norm(original), b = norm(text);
     if ((wo >= 6 && wt < wo * 0.8) || b.length < a.length * 0.7) flags.push('shortened');
-    const dist = editDistance(a, b);
-    if (dist === null ? changeRatio(original, text) > 0.35 : dist > 4 && dist / Math.max(a.length, b.length, 1) > 0.3) flags.push('bigchange');
-    if (numbersOf(original) !== numbersOf(text)) flags.push('numbers');
-    if ((text.match(NEG) || []).length < (original.match(NEG) || []).length) flags.push('negation');
+    const ch = charChange(a, b);
+    if (ch.dist > 4 && ch.dist / ch.len > 0.3) flags.push('bigchange');
+    if (numbersOf(quotes(original)) !== numbersOf(quotes(text))) flags.push('numbers');
+    if (negationChanged(original, text)) flags.push('negation');
     const lost = protectedTerms(original, ctx.words).filter((t) => countTerm(text, t) < countTerm(original, t));
     if (lost.length) flags.push('lostword');
     return { title, category, tags, tasks, text, flags, lost };
@@ -580,6 +660,34 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     for (const [i, t] of o.tasks.entries()) if (!isObj(t) || !str(t.id) || !str(t.text) || !str(t.cat) || typeof t.done !== 'boolean' || !(t.itemId === null || t.itemId === undefined || str(t.itemId))) return `Task number ${i + 1} is damaged.`;
     const dup = uniq(o.notes, 'notes') || uniq(o.items, 'items') || uniq(o.tasks, 'tasks') || uniq(o.categories, 'categories');
     if (dup) return dup;
+    // ids end up inside the page, so they may only use simple characters
+    const ID = /^[A-Za-z0-9_-]{1,64}$/;
+    for (const [list, what] of [[o.notes, 'note'], [o.items, 'item'], [o.tasks, 'task'], [o.categories, 'category']]) {
+      const bad = list.find((x) => !ID.test(x.id)); if (bad) return `A ${what} has an id with characters that are not allowed.`;
+    }
+    const strs = (a) => Array.isArray(a) && a.every(str);
+    for (const it of o.items) {
+      if (!strs(it.tags) || (it.flags !== undefined && !strs(it.flags)) || (it.lost !== undefined && !strs(it.lost))) return 'An item has damaged tags or warnings.';
+      if ((it.title !== undefined && !str(it.title)) || (it.order !== undefined && typeof it.order !== 'number') || (it.createdAt !== undefined && typeof it.createdAt !== 'number')) return 'An item has a damaged title, order or date.';
+    }
+    for (const c of o.categories) if ((c.desc !== undefined && c.desc !== null && !str(c.desc)) || (c.area !== undefined && c.area !== null && !str(c.area))) return `Category “${c.name}” is damaged.`;
+    for (const sys of ['todo', 'unsorted']) { const c = o.categories.find((x) => x.id === sys); if (c && c.parent) return `The built-in category “${c.name}” cannot be inside another category.`; }
+    for (const c of o.categories) if (c.area && !o.categories.some((x) => x.id === c.area && !x.parent)) return `Category “${c.name}” links its tasks to a missing category.`;
+    if (o.survey !== undefined && o.survey !== null) {
+      if (!isObj(o.survey) || !Array.isArray(o.survey.questions)) return 'The open questions in the backup are damaged.';
+      for (const q of o.survey.questions) {
+        if (!isObj(q) || !str(q.id) || !ID.test(q.id) || !['word', 'intent'].includes(q.kind)) return 'An open question in the backup is damaged.';
+        if (q.kind === 'word' ? !str(q.term) : !(str(q.quote) && str(q.question))) return 'An open question in the backup is damaged.';
+        if (q.guess !== undefined && !str(q.guess)) return 'An open question in the backup is damaged.';
+      }
+      if (o.survey.draft !== undefined && (!isObj(o.survey.draft) || !Object.values(o.survey.draft).every(str))) return 'The draft answers in the backup are damaged.';
+    }
+    if (o.prompts !== undefined && (!isObj(o.prompts) || !Object.values(o.prompts).every((v) => v === null || str(v)))) return 'The AI instructions in the backup are damaged.';
+    if (o.settings !== undefined) {
+      if (!isObj(o.settings)) return 'The settings in the backup are damaged.';
+      for (const [k, v] of Object.entries(o.settings)) if (v !== null && !['string', 'number', 'boolean'].includes(typeof v)) return `The setting “${k}” in the backup is damaged.`;
+    }
+    for (const t of o.tasks) if (t.createdAt !== undefined && typeof t.createdAt !== 'number') return 'A task has a damaged date.';
     const catIds = new Set(o.categories.map((c) => c.id)); const noteIds = new Set(o.notes.map((n) => n.id)); const itemIds = new Set(o.items.map((i) => i.id));
     for (const c of o.categories) {
       if (c.parent && !catIds.has(c.parent)) return `Category “${c.name}” points to a missing parent.`;
@@ -593,35 +701,64 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
       if (t.itemId && !itemIds.has(t.itemId)) return 'A task points to an item that is not in the backup.';
       if (!catIds.has(t.cat)) return 'A task points to a to-do list that is not in the backup.';
     }
-    if (o.words !== undefined && (!Array.isArray(o.words) || o.words.some((w) => !isObj(w) || !str(w.term)))) return 'The word list is damaged.';
+    if (o.words !== undefined && (!Array.isArray(o.words) || o.words.some((w) => !isObj(w) || !str(w.term) || !(w.meaning === undefined || str(w.meaning)) || !(w.id === undefined || (str(w.id) && ID.test(w.id)))))) return 'The word list is damaged.';
     if (o.rules !== undefined && (!Array.isArray(o.rules) || o.rules.some((r) => !str(r)))) return 'The rule list is damaged.';
     return '';
   }
   function validBackup(o) { return !backupProblem(o); }
 
-  /** after "---" splits edited text, find the matching pieces of the original (typo) text */
+  /**
+   * After "---" splits the edited text, find the matching pieces of the original (typo) text.
+   * Words are lined up allowing typos ("wnat" ~ "want", "mov eon" ~ "move on"). For very long texts the cut is
+   * placed at the same share of words. The result is always cut from the original text; .approx marks a guess.
+   */
   function splitOriginal(original, parts) {
-    const joined = parts.join('\n');
-    const d = diff(original, joined);
-    const mapPos = (pb) => {
-      let a = 0, b = 0;
-      for (const t of d) {
-        const len = t.s.length;
-        if (t.t === 'eq') { if (pb <= b + len) return a + (pb - b); a += len; b += len; } else if (t.t === 'del') a += len; else { if (pb <= b + len) return a; b += len; }
+    const toks = (t) => { const out = []; const re = /\S+/g; let m; while ((m = re.exec(t))) out.push({ w: m[0].toLowerCase(), at: m.index }); return out; };
+    const A = toks(original);
+    const B = []; const cutsB = []; // word index in B where part k (k>0) starts
+    parts.forEach((p, k) => { if (k) cutsB.push(B.length); for (const t of toks(p)) B.push(t); });
+    const n = A.length, m = B.length;
+    let approx = false; let cutsA;
+    const sim = (x, y) => {
+      if (x === y) return 2;
+      const d = editDistance(x, y); const L = Math.max(x.length, y.length);
+      if (d !== null && d <= Math.max(1, Math.floor(L / 2))) return 1;
+      if (x.length >= 2 && y.length >= 2 && (y.startsWith(x) || x.startsWith(y))) return 1; // "mov" / "move"
+      return -1;
+    };
+    if (n && m && n * m <= 4e6) {
+      // global alignment, keep for each B word the A word it lines up with (or the next one)
+      const W = m + 1; const score = new Int32Array((n + 1) * W); const move = new Uint8Array((n + 1) * W);
+      for (let i = 1; i <= n; i++) { score[i * W] = -i; move[i * W] = 1; }
+      for (let j = 1; j <= m; j++) { score[j] = -j; move[j] = 2; }
+      for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) {
+        const d = score[(i - 1) * W + j - 1] + sim(A[i - 1].w, B[j - 1].w), u = score[(i - 1) * W + j] - 1, l = score[i * W + j - 1] - 1;
+        if (d >= u && d >= l) { score[i * W + j] = d; move[i * W + j] = 0; } else if (u >= l) { score[i * W + j] = u; move[i * W + j] = 1; } else { score[i * W + j] = l; move[i * W + j] = 2; }
       }
-      return a;
-    };
-    const snap = (pos) => {
-      if (pos <= 0 || original[pos - 1] === '\n') return pos;
-      const back = original.lastIndexOf('\n', pos), fwd = original.indexOf('\n', pos);
-      const cands = [back + 1, fwd + 1].filter((x) => x > 0 && Math.abs(x - pos) <= 60);
-      return cands.length ? cands.sort((x, y) => Math.abs(x - pos) - Math.abs(y - pos))[0] : pos;
-    };
-    const cuts = [0]; let off = 0;
-    for (let k = 0; k < parts.length - 1; k++) { off += parts[k].length + 1; cuts.push(snap(mapPos(off))); }
-    cuts.push(original.length);
-    const out = parts.map((p, k) => original.slice(cuts[k], Math.max(cuts[k], cuts[k + 1])).trim());
-    return out.some((x) => !x) ? parts.slice() : out;
+      const mapB = new Int32Array(m + 1).fill(-1); mapB[m] = n; let i = n, j = m;
+      while (i > 0 || j > 0) {
+        const mv = i > 0 && j > 0 ? move[i * W + j] : i > 0 ? 1 : 2;
+        if (mv === 0) { mapB[j - 1] = i - 1; i--; j--; } else if (mv === 1) i--; else { mapB[j - 1] = -1; j--; }
+      }
+      for (let k = m - 1; k >= 0; k--) if (mapB[k] < 0) mapB[k] = mapB[k + 1]; // an extra word maps to the next aligned one
+      cutsA = cutsB.map((cb) => mapB[cb]);
+    } else { approx = true; cutsA = cutsB.map((cb) => Math.round((cb / Math.max(m, 1)) * n)); }
+    // character positions in the original; prefer starting a part at the beginning of a line
+    const pos = cutsA.map((ia) => {
+      if (ia >= n) return original.length;
+      let p = A[ia].at; const ls = original.lastIndexOf('\n', p - 1) + 1;
+      if (/^\s*$/.test(original.slice(ls, p))) p = ls;
+      return p;
+    });
+    const bounds = [0, ...pos, original.length];
+    for (let k = 1; k < bounds.length; k++) if (bounds[k] < bounds[k - 1]) bounds[k] = bounds[k - 1];
+    let out = parts.map((_, k) => original.slice(bounds[k], bounds[k + 1]).trim());
+    if (out.some((x) => !x)) { // never relabel cleaned text as original: fall back to an even share of the original
+      approx = true; const per = original.length / parts.length;
+      out = parts.map((_, k) => original.slice(Math.round(per * k), k === parts.length - 1 ? original.length : Math.round(per * (k + 1))).trim());
+    }
+    out.approx = approx;
+    return out;
   }
 
   return {
@@ -629,7 +766,7 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     makeBlocks, groupsFromStarts, blockWindows, parseJSON, fill, protectedTerms, buildSplitPrompt, buildSurveyPrompt,
     buildOrganizePrompt, bulkSplitPrompt, bulkOrganizePrompt, bulkSurveyPrompt, diff, changeRatio, countTerm, checkOrganize,
     checkSurvey, fmtDate, safeName, categoryMarkdown, allMarkdown, visibleTasks, validBackup, backupProblem, itemsIn, linkedTasks,
-    editDistance, splitOriginal, taskSupport,
+    editDistance, splitOriginal, taskSupport, taskDone, charChange, wordMatch,
   };
 })();
 if (typeof window !== 'undefined') window.MDCore = MDCore;
@@ -641,7 +778,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
 (() => {
   'use strict';
   const C = window.MDCore;
-  const VERSION = "1.0.1";
+  const VERSION = "1.0.2";
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -722,27 +859,33 @@ if (typeof module !== 'undefined') module.exports = MDCore;
 
   let saveTimer = null, folderTimer = null, saveState = 'saved';
   const LIFE = { ok: false, blocked: false, rev: 0 }; // ok = state loaded safely; blocked = another window took over
-  function save() {
+  function save(opts) {
     if (!LIFE.ok || LIFE.blocked || !S) return; // never write when the load failed or another window is in charge
     saveState = 'saving'; paintSaveState();
     clearTimeout(saveTimer);
     saveTimer = setTimeout(writeState, 250);
+    if (opts && opts.folder === false) return; // folder bookkeeping only: no new folder copy
     clearTimeout(folderTimer);
     folderTimer = setTimeout(syncFolder, 1500);
   }
+  let writing = false, writeAgain = false;
+  /** writes run one at a time, so a slow save cannot be mistaken for another window's save */
   async function writeState() {
     if (!LIFE.ok || LIFE.blocked) return;
-    const next = LIFE.rev + 1; S.rev = next;
+    if (writing) { writeAgain = true; return; }
+    writing = true;
     try {
+      const next = LIFE.rev + 1; S.rev = next;
       const ok = await store.putState(S, LIFE.rev);
-      if (ok) { LIFE.rev = next; saveState = 'saved'; } else { saveState = 'error'; blockWindow('changed'); }
-    } catch (e) { saveState = 'error'; toast('Could not save: ' + e.message + '. Mind Desk will try again with your next change.', 6000); }
+      if (ok) { LIFE.rev = next; saveState = writeAgain ? 'saving' : 'saved'; } else { saveState = 'error'; blockWindow('changed'); }
+    } catch (e) { saveState = 'error'; toast('Could not save: ' + e.message + '. Mind Desk will try again with your next change.', 6000); } finally { writing = false; }
     paintSaveState();
+    if (writeAgain && !LIFE.blocked) { writeAgain = false; writeState(); }
   }
   function paintSaveState() {
     const el = $('#savestate'); if (!el) return;
     const f = FOLDER.handle ? (FOLDER.ok ? ` · folder “${esc(FOLDER.name)}”` : ' · <a href="#" data-act="reconnectFolder">reconnect folder</a>') : '';
-    el.innerHTML = (saveState === 'saved' ? 'Saved' : saveState === 'saving' ? 'Saving…' : '<span style="color:var(--bad)">Not saved</span>') + f;
+    el.innerHTML = (saveState === 'saved' ? 'Saved' : saveState === 'saving' ? 'Saving…' : '<span style="color:var(--bad)">Not saved</span>') + f + (LIFE.noLock ? ' · <span title="Only one Mind Desk window should be open">one-window check off</span>' : '');
   }
 
   /* ================= helpers ================= */
@@ -793,9 +936,11 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     numbers: ['bad', 'A number or date changed'],
     negation: ['bad', 'A “not / never / don’t” word disappeared, so the meaning may have flipped'],
     taskcheck: ['warn', 'A task may not match your note. Check the tasks.'],
+    splitguess: ['warn', 'Your original text was divided approximately (very long note). Check “Show my original”.'],
   };
   function flagChips(it) {
-    return (it.flags || []).map((f) => {
+    const sv = it.surveyFailed ? `<span class="chip warn">The questions step failed for this note, so its shortcodes were not checked</span> <button class="btn small" data-act="resurvey" data-id="${esc(it.id)}">Ask questions again</button> ` : '';
+    return sv + (it.flags || []).map((f) => {
       const [cls, txt] = FLAG_TEXT[f] || ['warn', f];
       const extra = f === 'lostword' && it.lost && it.lost.length ? ': ' + it.lost.join(', ') : f === 'aierror' && it.error ? ': ' + it.error : '';
       return `<span class="chip ${cls}">${esc(txt + extra)}</span>`;
@@ -995,7 +1140,8 @@ if (typeof module !== 'undefined') module.exports = MDCore;
         else { const p = C.buildSurveyPrompt(prompt('survey'), chunks[i].text, ctx()); all = all.concat((await aiJSON('survey', p.system, p.user)).questions || []); }
       } catch (e) { if (e.name === 'AbortError' || e.conn) throw e; chunks[i].items.forEach((it) => failed.add(it)); }
     }
-    if (failed.size) toast(`The questions step failed for ${failed.size} note part(s) (the AI answer was not usable). They are organized without questions.`, 7000);
+    for (const it of items) it.surveyFailed = failed.has(it);
+    if (failed.size) toast(`The questions step failed for ${failed.size} note(s) (the AI answer was not usable). They are marked in Review.`, 7000);
     return C.checkSurvey(all, ctx());
   }
 
@@ -1103,8 +1249,14 @@ if (typeof module !== 'undefined') module.exports = MDCore;
       FOLDER.ok = (await h.queryPermission({ mode: 'readwrite' })) === 'granted';
     } catch (e) { FOLDER.ok = false; }
   }
+  const stillInCharge = () => LIFE.ok && !LIFE.blocked;
+  function stopped() { const e = new Error('another window is in charge'); e.stopped = true; return e; }
+  /** a file only replaces the old one at close(); if this window lost control meanwhile, the write is thrown away */
   async function writeFile(dir, name, content) {
-    const fh = await dir.getFileHandle(name, { create: true }); const w = await fh.createWritable(); await w.write(content); await w.close();
+    if (!stillInCharge()) throw stopped();
+    const fh = await dir.getFileHandle(name, { create: true }); const w = await fh.createWritable(); await w.write(content);
+    if (!stillInCharge()) { try { await w.abort(); } catch (e) { /* ignore */ } throw stopped(); }
+    await w.close();
   }
   async function syncFolder() {
     if (!FOLDER.handle || !FOLDER.ok) return;
@@ -1121,7 +1273,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
         taken.add(name.toLowerCase()); files.push(name);
         await writeFile(org, name, C.categoryMarkdown(S, c.id));
       }
-      for (const old of S.folderFiles) if (!files.includes(old)) { try { await org.removeEntry(old); } catch (e) { /* gone */ } }
+      for (const old of S.folderFiles) if (!files.includes(old)) { if (!stillInCharge()) throw stopped(); try { await org.removeEntry(old); } catch (e) { /* gone */ } }
       S.folderFiles = files;
       const orig = await root.getDirectoryHandle('Originals', { create: true });
       for (const n of S.notes) {
@@ -1129,9 +1281,9 @@ if (typeof module !== 'undefined') module.exports = MDCore;
         await writeFile(orig, `${new Date(n.addedAt).toISOString().slice(0, 10)} ${C.safeName(n.name)} [${n.id.slice(-6)}].txt`, n.text);
         S.folderOriginals.push(n.id);
       }
-      save();
+      save({ folder: false });
       FOLDER.msg = 'Last saved to folder at ' + new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-    } catch (e) { FOLDER.ok = false; FOLDER.msg = 'Folder save failed: ' + e.message; }
+    } catch (e) { if (e.stopped) return; FOLDER.ok = false; FOLDER.msg = 'Folder save failed: ' + e.message; }
     paintSaveState();
   }
 
@@ -1223,14 +1375,14 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     else if (v === 'words') el.innerHTML = viewWords();
     else if (v === 'settings') el.innerHTML = viewSettings();
     else if (v.startsWith('cat:')) el.innerHTML = cat(v.slice(4)) ? viewCategory(v.slice(4)) : '<div class="empty">This category no longer exists.</div>';
-    if (UI.focus) { const f = $(`[data-item="${UI.focus}"]`); if (f) { f.scrollIntoView({ block: 'center' }); f.style.outline = '2px solid var(--accent)'; } UI.focus = null; }
+    if (UI.focus) { const f = $(`[data-item="${CSS.escape(UI.focus)}"]`); if (f) { f.scrollIntoView({ block: 'center' }); f.style.outline = '2px solid var(--accent)'; } UI.focus = null; }
   }
 
   /* ---------- inbox ---------- */
   function viewInbox() {
     const notes = [...S.notes].sort((a, b) => b.addedAt - a.addedAt);
     if (!notes.find((n) => n.id === UI.selNote)) UI.selNote = notes[0] ? notes[0].id : null;
-    const list = notes.map((n) => `<div class="noteitem${n.id === UI.selNote ? ' on' : ''}" data-act="selNote" data-id="${n.id}">
+    const list = notes.map((n) => `<div class="noteitem${n.id === UI.selNote ? ' on' : ''}" data-act="selNote" data-id="${esc(n.id)}">
         <div class="nm">${esc(n.name)}</div><div class="sub">${NOTE_CHIP[noteStatus(n)]}<span>${esc(C.fmtDate(n.addedAt))}</span></div></div>`).join('');
     const tools = `<div class="tools"><button class="btn" data-act="addFiles">＋ Add files</button><button class="btn" data-act="pasteNote">📋 Paste a note</button></div>`;
     const n = S.notes.find((x) => x.id === UI.selNote);
@@ -1242,13 +1394,13 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     } else {
       const its = S.items.filter((i) => i.noteId === n.id).sort((a, b) => a.order - b.order);
       mid = `<div class="row" style="margin-bottom:10px"><h2 style="margin:0;font-size:16px;flex:1">${esc(n.name)}</h2>
-          <button class="btn small" data-act="renameNote" data-id="${n.id}">Rename</button>
-          ${n.status !== 'new' ? `<button class="btn small" data-act="reorganizeNote" data-id="${n.id}">Organize again</button>` : ''}
-          <button class="btn small danger" data-act="deleteNote" data-id="${n.id}">Delete</button></div>
+          <button class="btn small" data-act="renameNote" data-id="${esc(n.id)}">Rename</button>
+          ${n.status !== 'new' ? `<button class="btn small" data-act="reorganizeNote" data-id="${esc(n.id)}">Organize again</button>` : ''}
+          <button class="btn small danger" data-act="deleteNote" data-id="${esc(n.id)}">Delete</button></div>
         <div class="muted small" style="margin-bottom:8px">Added ${esc(fmtTime(n.addedAt))} · ${n.text.length.toLocaleString()} characters · ${n.source === 'file' ? 'from a file' : 'pasted'}</div>
         <div class="notebody pre">${esc(n.text)}</div>`;
       const st = { pending: '<span class="chip warn">Waiting</span>', review: '<span class="chip warn">To review</span>', approved: '<span class="chip good">Done</span>' };
-      right = `<h2 style="font-size:15px;margin:0 0 10px">What the AI made</h2>` + (its.length ? its.map((i) => `<div class="mini" data-act="openItem" data-id="${i.id}">
+      right = `<h2 style="font-size:15px;margin:0 0 10px">What the AI made</h2>` + (its.length ? its.map((i) => `<div class="mini" data-act="openItem" data-id="${esc(i.id)}">
           <div class="t">${esc(i.title || i.original.slice(0, 60))}</div><div class="row small" style="margin-top:4px">${st[i.status] || ''}${i.status !== 'pending' ? `<span class="muted">${esc(C.catPath(cats(), i.cat))}</span>` : ''}</div></div>`).join('')
         : `<p class="muted">Not organized yet. Press <b>✨ Organize all</b>.</p>`);
     }
@@ -1256,23 +1408,33 @@ if (typeof module !== 'undefined') module.exports = MDCore;
   }
 
   /* ---------- review ---------- */
-  function editorHtml(it) {
+  function captureDraft() {
+    if (!UI.editing || !$('#editor')) return;
+    UI.draft = {
+      id: UI.editing, title: $('#edTitle').value, cat: $('#edCat').value, text: $('#edText').value,
+      tags: $$('[data-tag]').filter((x) => x.checked).map((x) => x.dataset.tag),
+      tasks: $$('#edTasks [data-taskrow]').map((r) => ({ text: $('[data-tf=text]', r).value, done: $('[data-tf=done]', r).checked, cat: $('[data-tf=cat]', r).value })),
+    };
+  }
+  function editorHtml(item) {
+    const d = UI.draft && UI.draft.id === item.id ? UI.draft : null; // unsaved changes win over the stored item
+    const it = d ? Object.assign({}, item, { title: d.title, cat: d.cat, text: d.text, tags: d.tags }) : item;
     const tags = S.categories.filter((c) => !C.isTodoCat(cats(), c.id) && c.id !== 'todo' && c.id !== 'unsorted');
-    const tasks = itemTasks(it.id);
+    const tasks = d ? d.tasks : itemTasks(it.id);
     const subs = C.todoSubs(cats());
     const taskRow = (t) => `<div class="row" data-taskrow style="margin-bottom:6px"><input type="checkbox" data-tf="done" ${t.done ? 'checked' : ''} aria-label="Done">
         <input type="text" data-tf="text" value="${esc(t.text)}" style="flex:1;min-width:200px"><select data-tf="cat">${catOptions(t.cat, subs)}</select>
         <button class="btn small" data-act="rmTaskRow" title="Remove">✕</button></div>`;
-    return `<div class="card" data-item="${it.id}" id="editor">
+    return `<div class="card" data-item="${esc(it.id)}" id="editor">
       <div class="field"><label for="edTitle">Title</label><input type="text" id="edTitle" value="${esc(it.title)}"></div>
       <div class="grid2"><div class="field"><label for="edCat">Category</label><select id="edCat">${catOptions(it.cat)}</select></div>
-        <div class="field"><label>Also show in</label><div class="row">${tags.map((c) => `<label class="small"><input type="checkbox" data-tag="${c.id}" ${it.tags.includes(c.id) ? 'checked' : ''}> ${esc(C.catPath(cats(), c.id))}</label>`).join('')}</div></div></div>
+        <div class="field"><label>Also show in</label><div class="row">${tags.map((c) => `<label class="small"><input type="checkbox" data-tag="${esc(c.id)}" ${it.tags.includes(c.id) ? 'checked' : ''}> ${esc(C.catPath(cats(), c.id))}</label>`).join('')}</div></div></div>
       <div class="field"><label for="edText">Text</label><textarea id="edText" rows="${Math.min(24, it.text.split('\n').length + 3)}">${esc(it.text)}</textarea>
         <span class="hint">Tip: put <code>---</code> on its own line to split this into two items.</span></div>
       <div class="field"><label>Tasks</label><div id="edTasks">${tasks.map(taskRow).join('')}</div>
         <div><button class="btn small" data-act="addTaskRow">＋ Add task</button></div></div>
       <template id="taskRowTpl">${taskRow({ text: '', done: false, cat: subs[0] ? subs[0].id : 'todo' })}</template>
-      <div class="actions"><button class="btn primary" data-act="saveEdit" data-id="${it.id}">Save</button><button class="btn" data-act="cancelEdit">Cancel</button></div></div>`;
+      <div class="actions"><button class="btn primary" data-act="saveEdit" data-id="${esc(it.id)}">Save</button><button class="btn" data-act="cancelEdit">Cancel</button></div></div>`;
   }
   function tasksPreview(it) {
     const ts = itemTasks(it.id); if (!ts.length) return '';
@@ -1294,18 +1456,18 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     for (const it of list) {
       if (UI.editing === it.id) { h += editorHtml(it); continue; }
       const d = diffHtml(it.original, it.text); const n = noteOf(it); const prev = prevInNote(it);
-      h += `<div class="card" data-item="${it.id}">
+      h += `<div class="card" data-item="${esc(it.id)}">
         <div class="itemhead"><div class="grow"><h3>${esc(it.title)}</h3><div class="meta">${esc(n ? n.name : '')} · ${esc(C.fmtDate(it.createdAt))}</div></div>
-          <select data-change="setCat" data-id="${it.id}" aria-label="Category">${catOptions(it.cat)}</select></div>
+          <select data-change="setCat" data-id="${esc(it.id)}" aria-label="Category">${catOptions(it.cat)}</select></div>
         <div class="row" style="margin-top:6px">${it.tags.map((t) => `<span class="chip acc">also: ${esc(C.catPath(cats(), t))}</span>`).join(' ')} ${flagChips(it)}</div>
         <div class="cmp"><div><div class="lbl">Your original</div><div class="pre">${d.left}</div></div><div><div class="lbl">Cleaned by AI</div><div class="pre">${d.right}</div></div></div>
         ${tasksPreview(it)}
-        <div class="actions"><button class="btn primary" data-act="approve" data-id="${it.id}">✓ Approve</button>
-          <button class="btn" data-act="edit" data-id="${it.id}">Edit</button>
-          ${it.text !== it.original ? `<button class="btn" data-act="useOriginal" data-id="${it.id}">Use my original text</button>` : ''}
-          ${prev ? `<button class="btn" data-act="mergePrev" data-id="${it.id}" title="Join with the item above from the same note">Join with previous</button>` : ''}
-          ${S.settings.provider !== 'manual' ? `<button class="btn" data-act="rerun" data-id="${it.id}">Ask AI again</button>` : ''}
-          <button class="btn danger" data-act="deleteItem" data-id="${it.id}">Delete</button></div></div>`;
+        <div class="actions"><button class="btn primary" data-act="approve" data-id="${esc(it.id)}">✓ Approve</button>
+          <button class="btn" data-act="edit" data-id="${esc(it.id)}">Edit</button>
+          ${it.text !== it.original ? `<button class="btn" data-act="useOriginal" data-id="${esc(it.id)}">Use my original text</button>` : ''}
+          ${prev ? `<button class="btn" data-act="mergePrev" data-id="${esc(it.id)}" title="Join with the item above from the same note">Join with previous</button>` : ''}
+          ${S.settings.provider !== 'manual' ? `<button class="btn" data-act="rerun" data-id="${esc(it.id)}">Ask AI again</button>` : ''}
+          <button class="btn danger" data-act="deleteItem" data-id="${esc(it.id)}">Delete</button></div></div>`;
     }
     return h;
   }
@@ -1317,11 +1479,11 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     return `<p class="hint">The AI found ${qs.length} thing(s) it could not understand. Your answers are saved in <b>My words &amp; rules</b> and used every time from now on. Leave a box empty to skip it.</p>
       ${qs.map((q, k) => q.kind === 'word'
     ? `<div class="q"><label for="sq${k}"><b>What does “${esc(q.term)}” mean?</b></label>
-          <div class="row" style="margin-top:6px"><input type="text" id="sq${k}" data-q="${q.id}" value="${esc(draft[q.id] || '')}" style="flex:1;min-width:240px" placeholder="${esc(q.guess ? 'AI guess: ' + q.guess : 'Your meaning')}">
+          <div class="row" style="margin-top:6px"><input type="text" id="sq${k}" data-q="${esc(q.id)}" value="${esc(draft[q.id] || '')}" style="flex:1;min-width:240px" placeholder="${esc(q.guess ? 'AI guess: ' + q.guess : 'Your meaning')}">
           ${q.guess ? `<button class="btn small" data-act="useGuess" data-k="${k}">Use the guess</button>` : ''}
           <button class="btn small" data-act="keepWord" data-k="${k}" title="Not a typo, keep it unchanged">Keep as is</button></div></div>`
     : `<div class="q"><div class="quote">“${esc(q.quote)}”</div><label for="sq${k}"><b>${esc(q.question)}</b></label>
-          <div class="row" style="margin-top:6px"><input type="text" id="sq${k}" data-q="${q.id}" value="${esc(draft[q.id] || '')}" style="flex:1;min-width:240px" placeholder="${esc(q.guess ? 'AI guess: ' + q.guess : 'Your answer')}">
+          <div class="row" style="margin-top:6px"><input type="text" id="sq${k}" data-q="${esc(q.id)}" value="${esc(draft[q.id] || '')}" style="flex:1;min-width:240px" placeholder="${esc(q.guess ? 'AI guess: ' + q.guess : 'Your answer')}">
           ${q.guess ? `<button class="btn small" data-act="useGuess" data-k="${k}">Use the guess</button>` : ''}</div></div>`).join('')}
       <div class="actions"><button class="btn primary" data-act="submitSurvey">Save answers and continue</button><button class="btn" data-act="skipSurvey">Skip questions</button></div>`;
   }
@@ -1329,9 +1491,9 @@ if (typeof module !== 'undefined') module.exports = MDCore;
   /* ---------- to-do ---------- */
   function taskHtml(t) {
     const it = t.itemId ? S.items.find((i) => i.id === t.itemId) : null;
-    return `<div class="todo${t.done ? ' done' : ''}"><input type="checkbox" data-act="toggleTask" data-id="${t.id}" ${t.done ? 'checked' : ''} aria-label="Done">
-      <div class="tx">${esc(t.text)}${it ? `<div class="src">from: <a href="#" data-act="openItem" data-id="${it.id}">${esc(it.title)}</a></div>` : ''}</div>
-      <button class="btn small link" data-act="editTask" data-id="${t.id}">Edit</button><button class="btn small link" data-act="deleteTask" data-id="${t.id}" title="Delete">✕</button></div>`;
+    return `<div class="todo${t.done ? ' done' : ''}"><input type="checkbox" data-act="toggleTask" data-id="${esc(t.id)}" ${t.done ? 'checked' : ''} aria-label="Done">
+      <div class="tx">${esc(t.text)}${it ? `<div class="src">from: <a href="#" data-act="openItem" data-id="${esc(it.id)}">${esc(it.title)}</a></div>` : ''}</div>
+      <button class="btn small link" data-act="editTask" data-id="${esc(t.id)}">Edit</button><button class="btn small link" data-act="deleteTask" data-id="${esc(t.id)}" title="Delete">✕</button></div>`;
   }
   function viewTodo() {
     const q = UI.search.toLowerCase();
@@ -1344,7 +1506,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
       if (g.id === 'todo' && !open.length && !done.length) continue;
       h += `<div class="todogroup"><h2>${esc(g.id === 'todo' ? 'Other tasks' : g.name)} <span class="chip">${open.length}</span></h2>
         ${open.map(taskHtml).join('')}${UI.showDone ? done.map(taskHtml).join('') : ''}
-        <div class="row"><input type="text" placeholder="Add a task…" data-newtask="${g.id}" style="flex:1;max-width:520px"><button class="btn small" data-act="addTask" data-cat="${g.id}">Add</button></div></div>`;
+        <div class="row"><input type="text" placeholder="Add a task…" data-newtask="${esc(g.id)}" style="flex:1;max-width:520px"><button class="btn small" data-act="addTask" data-cat="${esc(g.id)}">Add</button></div></div>`;
     }
     const notes = S.items.filter((i) => i.status === 'approved' && i.cat === 'todo');
     if (notes.length) h += `<div class="todogroup"><h2>Notes filed under To-do</h2>${notes.map(itemCard).join('')}</div>`;
@@ -1355,9 +1517,9 @@ if (typeof module !== 'undefined') module.exports = MDCore;
   function itemCard(it) {
     if (UI.editing === it.id) return editorHtml(it);
     const n = noteOf(it);
-    return `<div class="card" data-item="${it.id}"><div class="itemhead"><div class="grow"><h3>${esc(it.title)}</h3>
+    return `<div class="card" data-item="${esc(it.id)}"><div class="itemhead"><div class="grow"><h3>${esc(it.title)}</h3>
         <div class="meta">${esc(C.fmtDate(it.createdAt))}${n ? ' · ' + esc(n.name) : ''} · ${esc(C.catPath(cats(), it.cat))}${it.tags.length ? ' · also: ' + esc(it.tags.map((t) => C.catPath(cats(), t)).join(', ')) : ''}</div></div>
-        <button class="btn small" data-act="edit" data-id="${it.id}">Edit</button><button class="btn small danger" data-act="deleteItem" data-id="${it.id}">Delete</button></div>
+        <button class="btn small" data-act="edit" data-id="${esc(it.id)}">Edit</button><button class="btn small danger" data-act="deleteItem" data-id="${esc(it.id)}">Delete</button></div>
       <div class="pre" style="margin-top:8px">${esc(it.text)}</div>${tasksPreview(it)}
       ${it.text !== it.original ? `<details style="margin-top:8px"><summary class="small">Show my original</summary><div class="pre muted" style="margin-top:6px">${esc(it.original)}</div></details>` : ''}</div>`;
   }
@@ -1366,7 +1528,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     const kids = C.children(cats(), id);
     let items = itemsIn(id).filter((i) => !q || (i.title + ' ' + i.text).toLowerCase().includes(q)).sort((a, b) => b.createdAt - a.createdAt);
     let h = c.desc ? `<p class="hint" style="margin-top:0">${esc(c.desc)}</p>` : '';
-    if (kids.length) h += `<div class="row" style="margin-bottom:14px">${kids.map((k) => `<button class="btn small" data-act="nav" data-v="cat:${k.id}">${esc(k.name)} (${itemsIn(k.id).length})</button>`).join('')}</div>`;
+    if (kids.length) h += `<div class="row" style="margin-bottom:14px">${kids.map((k) => `<button class="btn small" data-act="nav" data-v="cat:${esc(k.id)}">${esc(k.name)} (${itemsIn(k.id).length})</button>`).join('')}</div>`;
     const linked = C.todoSubs(cats()).filter((s) => s.area === id).map((s) => s.id);
     const tasks = C.visibleTasks(S).filter((t) => linked.includes(t.cat) && !t.done && (!q || t.text.toLowerCase().includes(q)));
     if (tasks.length) h += `<div class="todogroup"><h2>Open tasks <span class="chip">${tasks.length}</span></h2>${tasks.map(taskHtml).join('')}</div>`;
@@ -1379,8 +1541,8 @@ if (typeof module !== 'undefined') module.exports = MDCore;
   function viewWords() {
     return `<div class="box"><h2>My words</h2><p class="hint">Your shortcodes, names and private words. The AI keeps them unchanged and uses the meaning to understand your notes.</p>
       <table class="words"><thead><tr><th style="width:28%">Word</th><th>Meaning</th><th style="width:40px"></th></tr></thead><tbody>
-      ${S.words.map((w) => `<tr><td><input type="text" data-word="${w.id}" data-wf="term" value="${esc(w.term)}" style="width:100%"></td><td><input type="text" data-word="${w.id}" data-wf="meaning" value="${esc(w.meaning)}" style="width:100%"></td>
-        <td><button class="btn small link" data-act="delWord" data-id="${w.id}" title="Delete">✕</button></td></tr>`).join('')}
+      ${S.words.map((w) => `<tr><td><input type="text" data-word="${esc(w.id)}" data-wf="term" value="${esc(w.term)}" style="width:100%"></td><td><input type="text" data-word="${esc(w.id)}" data-wf="meaning" value="${esc(w.meaning)}" style="width:100%"></td>
+        <td><button class="btn small link" data-act="delWord" data-id="${esc(w.id)}" title="Delete">✕</button></td></tr>`).join('')}
       </tbody></table><div style="margin-top:10px"><button class="btn" data-act="addWord">＋ Add word</button></div></div>
       <div class="box"><h2>My rules</h2><p class="hint">Simple rules in your own words, for example: “anything about plugins or sites goes to My business”.</p>
       ${S.rules.map((r, k) => `<div class="row" style="margin-bottom:6px"><input type="text" data-rule="${k}" value="${esc(r)}" style="flex:1"><button class="btn small link" data-act="delRule" data-k="${k}" title="Delete">✕</button></div>`).join('')}
@@ -1433,21 +1595,21 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     const tops = S.categories.filter((c) => !c.parent);
     const parentOpts = (c) => {
       if (c.system || C.children(cats(), c.id).length) return '<option value="">(top level)</option>';
-      return '<option value="">(top level)</option>' + tops.filter((t) => t.id !== c.id && t.id !== 'unsorted').map((t) => `<option value="${t.id}"${c.parent === t.id ? ' selected' : ''}>under ${esc(t.name)}</option>`).join('');
+      return '<option value="">(top level)</option>' + tops.filter((t) => t.id !== c.id && t.id !== 'unsorted').map((t) => `<option value="${esc(t.id)}"${c.parent === t.id ? ' selected' : ''}>under ${esc(t.name)}</option>`).join('');
     };
     const row = (c, child) => {
       const isSub = c.parent === 'todo';
-      return `<div class="catrow${child ? ' child' : ''}"><input type="text" class="nm" data-catf="name" data-id="${c.id}" value="${esc(c.name)}" aria-label="Name">
-        <input type="text" data-catf="desc" data-id="${c.id}" value="${esc(c.desc || '')}" placeholder="What belongs here (helps the AI)" aria-label="Description">
-        ${isSub ? `<select data-catf="area" data-id="${c.id}" title="Also show these tasks in"><option value="">tasks show only in To-do</option>${tops.filter((t) => t.id !== 'todo' && t.id !== 'unsorted').map((t) => `<option value="${t.id}"${c.area === t.id ? ' selected' : ''}>also show in ${esc(t.name)}</option>`).join('')}</select>`
-    : `<select data-catf="parent" data-id="${c.id}" ${c.system ? 'disabled' : ''}>${parentOpts(c)}</select>`}
-        <span class="row" style="gap:2px"><button class="btn small link" data-act="moveCat" data-id="${c.id}" data-d="-1" title="Move up">↑</button><button class="btn small link" data-act="moveCat" data-id="${c.id}" data-d="1" title="Move down">↓</button>
-        ${c.system ? '' : `<button class="btn small link" data-act="delCat" data-id="${c.id}" title="Delete">✕</button>`}</span></div>`;
+      return `<div class="catrow${child ? ' child' : ''}"><input type="text" class="nm" data-catf="name" data-id="${esc(c.id)}" value="${esc(c.name)}" aria-label="Name">
+        <input type="text" data-catf="desc" data-id="${esc(c.id)}" value="${esc(c.desc || '')}" placeholder="What belongs here (helps the AI)" aria-label="Description">
+        ${isSub ? `<select data-catf="area" data-id="${esc(c.id)}" title="Also show these tasks in"><option value="">tasks show only in To-do</option>${tops.filter((t) => t.id !== 'todo' && t.id !== 'unsorted').map((t) => `<option value="${esc(t.id)}"${c.area === t.id ? ' selected' : ''}>also show in ${esc(t.name)}</option>`).join('')}</select>`
+    : `<select data-catf="parent" data-id="${esc(c.id)}" ${c.system ? 'disabled' : ''}>${parentOpts(c)}</select>`}
+        <span class="row" style="gap:2px"><button class="btn small link" data-act="moveCat" data-id="${esc(c.id)}" data-d="-1" title="Move up">↑</button><button class="btn small link" data-act="moveCat" data-id="${esc(c.id)}" data-d="1" title="Move down">↓</button>
+        ${c.system ? '' : `<button class="btn small link" data-act="delCat" data-id="${esc(c.id)}" title="Delete">✕</button>`}</span></div>`;
     };
     let h = '';
     for (const t of tops) { h += row(t, false); for (const k of C.children(cats(), t.id)) h += row(k, true); }
     return `<div class="box"><h2>Categories</h2><p class="hint">Rename, describe, move or add. Good descriptions help the AI choose.</p>${h}
-      <div class="row" style="margin-top:12px"><input type="text" id="newCatName" placeholder="New category name"><select id="newCatParent"><option value="">(top level)</option>${tops.filter((t) => t.id !== 'unsorted').map((t) => `<option value="${t.id}">under ${esc(t.name)}</option>`).join('')}</select><button class="btn" data-act="addCat">＋ Add</button></div></div>`;
+      <div class="row" style="margin-top:12px"><input type="text" id="newCatName" placeholder="New category name"><select id="newCatParent"><option value="">(top level)</option>${tops.filter((t) => t.id !== 'unsorted').map((t) => `<option value="${esc(t.id)}">under ${esc(t.name)}</option>`).join('')}</select><button class="btn" data-act="addCat">＋ Add</button></div></div>`;
   }
   function promptEditor() {
     const names = { split: 'Step 1: split notes', survey: 'Step 2: questions', organize: 'Step 3: organize' };
@@ -1522,10 +1684,10 @@ if (typeof module !== 'undefined') module.exports = MDCore;
       if (!window.confirm(`Approve ${list.length} item(s)?${warn ? `\n${warn} of them have warnings.` : ''}`)) return;
       list.forEach((i) => { i.status = 'approved'; i.updatedAt = Date.now(); }); save(); render();
     },
-    edit(el) { if (UI.editing !== el.dataset.id && !leaveEditor()) return; UI.editing = el.dataset.id; UI.dirty = false; renderContent(); const ed = $('#editor'); if (ed) ed.scrollIntoView({ block: 'nearest' }); },
-    cancelEdit() { UI.editing = null; UI.dirty = false; renderContent(); },
-    addTaskRow() { const tpl = $('#taskRowTpl'); $('#edTasks').appendChild(tpl.content.cloneNode(true)); },
-    rmTaskRow(el) { el.closest('[data-taskrow]').remove(); },
+    edit(el) { if (UI.editing === el.dataset.id) return; if (!leaveEditor()) return; UI.editing = el.dataset.id; UI.dirty = false; UI.draft = null; renderContent(); const ed = $('#editor'); if (ed) ed.scrollIntoView({ block: 'nearest' }); },
+    cancelEdit() { UI.editing = null; UI.dirty = false; UI.draft = null; renderContent(); },
+    addTaskRow() { const tpl = $('#taskRowTpl'); $('#edTasks').appendChild(tpl.content.cloneNode(true)); UI.dirty = true; captureDraft(); },
+    rmTaskRow(el) { el.closest('[data-taskrow]').remove(); UI.dirty = true; captureDraft(); },
     saveEdit(el) {
       const it = S.items.find((i) => i.id === el.dataset.id);
       it.title = $('#edTitle').value.trim() || it.title; it.cat = $('#edCat').value;
@@ -1540,10 +1702,11 @@ if (typeof module !== 'undefined') module.exports = MDCore;
         const n = { id: C.uid('i'), noteId: it.noteId, order: it.order + k / 100, original: origs[k] || parts[k], text: parts[k], title: it.title + ` (part ${k + 1})`, cat: it.cat, tags: [...it.tags], status: it.status, flags: [], lost: [], surveyed: true, createdAt: it.createdAt, updatedAt: Date.now() };
         S.items.push(n);
       }
+      if (parts.length > 1 && origs.approx) S.items.filter((x) => x.id === it.id || (x.noteId === it.noteId && x.order > it.order && x.order < it.order + 1)).forEach((x) => { if (!x.flags.includes('splitguess')) x.flags.push('splitguess'); });
       if (parts.length > 1) toast(`Split into ${parts.length} items.`);
-      UI.editing = null; UI.dirty = false; save(); render();
+      UI.editing = null; UI.dirty = false; UI.draft = null; save(); render();
     },
-    useOriginal(el) { const it = S.items.find((i) => i.id === el.dataset.id); it.text = it.original; it.flags = it.flags.filter((f) => !['shortened', 'bigchange', 'lostword', 'notext'].includes(f)); save(); renderContent(); },
+    useOriginal(el) { const it = S.items.find((i) => i.id === el.dataset.id); it.text = it.original; it.flags = it.flags.filter((f) => !['shortened', 'bigchange', 'lostword', 'notext', 'numbers', 'negation'].includes(f)); it.lost = []; save(); renderContent(); },
     mergePrev(el) {
       if (busy()) return;
       const it = S.items.find((i) => i.id === el.dataset.id); const prev = prevInNote(it); if (!prev) return;
@@ -1558,22 +1721,32 @@ if (typeof module !== 'undefined') module.exports = MDCore;
       RUN.active = true; RUN.stop = false; paintTop(); setProgress('Asking AI again', 0, 0);
       try { await organizeOne(it); toast('Updated.'); } catch (e) { if (e.name !== 'AbortError') showError(e); } finally { RUN.active = false; UI.focus = it.id; save(); render(); }
     },
+    async resurvey(el) {
+      if (busy()) return;
+      const it = S.items.find((i) => i.id === el.dataset.id); if (!it) return;
+      RUN.active = true; RUN.stop = false; paintTop(); setProgress('Reading the note for questions', 0, 0);
+      try {
+        const qs = await runSurvey([it]); save();
+        if (it.surveyFailed) toast('The questions step failed again. You can still edit the note yourself.');
+        else if (qs.length) { S.survey = { questions: qs, createdAt: Date.now() }; UI.view = 'survey'; toast('Answer the questions, then use “Ask AI again” on the note.', 6000); } else toast('No questions this time.');
+      } catch (e) { if (e.name !== 'AbortError') showError(e); } finally { RUN.active = false; save(); render(); }
+    },
     deleteItem(el) { if (busy()) return; if (!window.confirm('Delete this item and its tasks? (Your original note stays in the Inbox.)')) return; removeItems([el.dataset.id]); save(); render(); },
     flaggedOnly(el) { UI.flaggedOnly = el.checked; renderContent(); },
     toggleTask(el) { const t = S.tasks.find((x) => x.id === el.dataset.id); t.done = el.checked; t.doneAt = t.done ? Date.now() : null; save(); render(); },
     editTask(el) { const t = S.tasks.find((x) => x.id === el.dataset.id); const v = window.prompt('Task', t.text); if (v && v.trim()) { t.text = v.trim(); save(); renderContent(); } },
     deleteTask(el) { S.tasks = S.tasks.filter((t) => t.id !== el.dataset.id); save(); render(); },
     addTask(el) {
-      const inp = $(`[data-newtask="${el.dataset.cat}"]`); const v = inp.value.trim(); if (!v) return;
+      const inp = $(`[data-newtask="${CSS.escape(el.dataset.cat)}"]`); const v = inp.value.trim(); if (!v) return;
       S.tasks.push({ id: C.uid('t'), itemId: null, text: v, done: false, cat: el.dataset.cat, createdAt: Date.now() }); save(); render();
-      const again = $(`[data-newtask="${el.dataset.cat}"]`); if (again) again.focus();
+      const again = $(`[data-newtask="${CSS.escape(el.dataset.cat)}"]`); if (again) again.focus();
     },
     toggleShowDone(el) { UI.showDone = el.checked; renderContent(); },
     useGuess(el) { const q = S.survey.questions[+el.dataset.k]; $('#sq' + el.dataset.k).value = q.guess; draftAnswer(q.id, q.guess); },
     keepWord(el) { const q = S.survey.questions[+el.dataset.k]; $('#sq' + el.dataset.k).value = '(keep as is)'; draftAnswer(q.id, '(keep as is)'); },
     submitSurvey() {
       for (const q of S.survey.questions) {
-        const v = ($(`[data-q="${q.id}"]`) || {}).value; if (!v || !v.trim()) continue;
+        const v = ($(`[data-q="${CSS.escape(q.id)}"]`) || {}).value; if (!v || !v.trim()) continue;
         if (q.kind === 'word') {
           const ex = S.words.find((w) => w.term.toLowerCase() === q.term.toLowerCase());
           const meaning = v.trim() === '(keep as is)' ? '' : v.trim();
@@ -1651,6 +1824,15 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     exportJSON() { download(`mind-desk-backup-${today()}.json`, JSON.stringify(exportObj(), null, 1), 'application/json'); },
     importJSON() { if (busy()) return; $('#importInput').click(); },
     downloadMD() { download(`mind-desk-${today()}.md`, C.allMarkdown(S), 'text/markdown'); },
+    recoveryDownload() { const r = UI.recovery; if (!r) return; const o = JSON.parse(JSON.stringify(r.state)); if (o.settings) delete o.settings.oaKey; o.app = 'mind-desk'; download(`mind-desk-unsaved-copy-${today()}.json`, JSON.stringify(o, null, 1), 'application/json'); },
+    recoveryRestore() {
+      if (busy()) return; const r = UI.recovery; if (!r) return;
+      const o = Object.assign({ app: 'mind-desk' }, JSON.parse(JSON.stringify(r.state))); const problem = C.backupProblem(o);
+      if (problem) { showError(new Error('That copy cannot be used: ' + problem)); return; }
+      if (!window.confirm(`Replace everything here with the unsaved copy from ${fmtTime(r.at)}?\nChanges made here since then will be lost (download a backup first if unsure).`)) return;
+      S = migrate(o); UI.recovery = null; store.del('recovery'); applyTheme(); UI.view = 'inbox'; save(); render(); paintNotice(); toast('The unsaved copy is back.');
+    },
+    async recoveryDismiss() { if (!window.confirm('Delete the unsaved copy from the other window? It cannot be brought back.')) return; await store.del('recovery'); UI.recovery = null; paintNotice(); },
     deleteAll() {
       if (busy()) return;
       if (!window.confirm('Delete ALL notes, items, tasks, words and settings in Mind Desk?\nMake a backup first if you are not sure.')) return;
@@ -1661,7 +1843,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
   function leaveEditor() {
     if (!UI.editing || !UI.dirty) return true;
     if (!window.confirm('You have changes in the editor that are not saved. Leave without saving them?')) return false;
-    UI.editing = null; UI.dirty = false; return true;
+    UI.editing = null; UI.dirty = false; UI.draft = null; return true;
   }
   function setConn(html) { UI.connResult = html; const el = $('#connResult'); if (el) el.innerHTML = html; }
   function removeItems(ids) {
@@ -1688,7 +1870,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     });
     document.addEventListener('change', (e) => {
       const el = e.target;
-      if (el.closest && el.closest('#editor')) { UI.dirty = true; return; }
+      if (el.closest && el.closest('#editor')) { UI.dirty = true; captureDraft(); return; }
       if (el.dataset.set) {
         const k = el.dataset.set; let v = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value;
         if (el.type === 'radio') v = el.value;
@@ -1714,7 +1896,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     document.addEventListener('input', (e) => {
       if (e.target.id === 'search') { UI.search = e.target.value; renderContent(); return; }
       if (e.target.dataset && e.target.dataset.q) { draftAnswer(e.target.dataset.q, e.target.value); return; }
-      if (e.target.closest && e.target.closest('#editor')) UI.dirty = true;
+      if (e.target.closest && e.target.closest('#editor')) { UI.dirty = true; captureDraft(); }
     });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && $('#overlay') && !$('#mpPrompt')) closeModal();
@@ -1757,38 +1939,64 @@ if (typeof module !== 'undefined') module.exports = MDCore;
   }
   /** another window is in charge (or saved newer data): stop writing, offer to take over */
   function blockWindow(reason) {
+    const unsaved = LIFE.ok && S && (saveState !== 'saved' || UI.dirty);
     LIFE.blocked = true; clearTimeout(saveTimer); clearTimeout(folderTimer);
+    if (unsaved) { // keep this window's work where the other window can find it (separate from the main data)
+      store.set('recovery', { at: Date.now(), state: JSON.parse(JSON.stringify(S)) }).catch(() => {});
+    }
     RUN.stop = true; if (RUN.ctrl) RUN.ctrl.abort(); if (RUN.manualReject) RUN.manualReject(); if (RUN.surveyWait) RUN.surveyWait.reject(abortErr());
     const text = reason === 'changed'
       ? 'Your notes were changed in another Mind Desk window. To avoid overwriting them, this window stopped saving.'
       : 'Mind Desk is open in another window or tab. Only one window can work at a time, so nothing gets overwritten.';
     const o = screen(`<h2>Mind Desk is open somewhere else</h2><p>${text}</p>
-      <div class="actions"><button class="btn primary" id="takeOver">Use Mind Desk here</button></div>
+      ${unsaved ? '<p class="banner">This window had changes that were not saved yet. A copy was kept: the other window offers it, or download it here.</p>' : ''}
+      <div class="actions"><button class="btn primary" id="takeOver">Use Mind Desk here</button>${S ? '<button class="btn" id="dlCopy">Download this window’s copy</button>' : ''}</div>
       <p class="muted small">The other window will then stop and show this message.</p>`, 'data-blocked');
     $('#takeOver', o).onclick = takeOver;
+    if ($('#dlCopy', o)) $('#dlCopy', o).onclick = () => download(`mind-desk-window-copy-${today()}.json`, JSON.stringify(exportObj(), null, 1), 'application/json');
   }
   function tryLock(steal) {
-    if (!navigator.locks) return Promise.resolve(true);
+    if (!navigator.locks || typeof navigator.locks.request !== 'function') { LIFE.noLock = true; return Promise.resolve(true); }
     return new Promise((resolve) => {
-      navigator.locks.request('mind-desk-window', steal ? { steal: true } : { ifAvailable: true }, (lock) => {
-        if (!lock) { resolve(false); return null; }
-        resolve(true); return new Promise(() => {}); // hold the lock while this window is open
-      }).catch(() => { if (!LIFE.blocked) blockWindow('other'); }); // another window took over
+      let held = false;
+      let req;
+      try {
+        req = navigator.locks.request('mind-desk-window', steal ? { steal: true } : { ifAvailable: true }, (lock) => {
+          if (!lock) { resolve(false); return null; }
+          held = true; LIFE.noLock = false; resolve(true); return new Promise(() => {}); // hold the lock while this window is open
+        });
+      } catch (e) { req = Promise.reject(e); }
+      Promise.resolve(req).catch(() => {
+        if (held) { if (!LIFE.blocked) blockWindow('other'); return; } // another window took over
+        LIFE.noLock = true; resolve(true); // the lock feature failed: carry on, the save check still protects the data
+      });
     });
+  }
+  /** a copy kept by a window that lost control with unsaved changes */
+  async function checkRecovery() {
+    if (!LIFE.ok || LIFE.blocked) return;
+    let rec; try { rec = await store.get('recovery'); } catch (e) { return; }
+    UI.recovery = rec && rec.state ? rec : null; paintNotice();
+  }
+  function paintNotice() {
+    const el = $('#notice'); if (!el) return;
+    const r = UI.recovery;
+    el.innerHTML = r ? `<div class="banner" style="margin:12px 20px 0">Another Mind Desk window had changes that were not saved (copy from ${esc(fmtTime(r.at))}: ${r.state.notes.length} notes, ${r.state.items.length} items).
+      <div class="row" style="margin-top:6px"><button class="btn small" data-act="recoveryDownload">Download that copy</button><button class="btn small" data-act="recoveryRestore">Use that copy instead</button><button class="btn small" data-act="recoveryDismiss">Delete that copy</button></div></div>` : '';
   }
   async function takeOver() {
     await tryLock(true);
     const b = $('#blocker'); if (b) b.remove(); const app = $('.app'); if (app) app.inert = false;
     LIFE.blocked = false;
     if (!wired) { wire(); wired = true; }
-    await loadState();
+    if (await loadState()) { await initFolder(); paintSaveState(); }
   }
   async function loadState() {
     let raw;
     try { raw = await store.get('state'); } catch (e) { LIFE.ok = false; fatal('Could not read your saved notes', 'The browser storage did not answer (' + ((e && e.message) || e) + ').'); return false; }
     S = migrate(raw); LIFE.rev = (raw && raw.rev) || 0; LIFE.ok = true; RUN.stop = false;
-    UI.editing = null; UI.dirty = false;
-    applyTheme(); render();
+    UI.editing = null; UI.dirty = false; UI.draft = null;
+    applyTheme(); render(); checkRecovery();
     if (S.survey) toast('The AI has questions for you. Open “Questions for you”.', 5000);
     return true;
   }
@@ -1802,6 +2010,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     if (!(await loadState())) return;
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
     await initFolder(); paintSaveState();
+    window.addEventListener('focus', checkRecovery);
   }
   start();
 })();

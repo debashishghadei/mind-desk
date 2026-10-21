@@ -1,9 +1,10 @@
 # Handoff — read this first
 
 **Project:** Mind Desk, a local AI note organizer for the owner (Debashish Ghadei). Plan, decisions and reasons: `DECISIONS.md`.
-**Current version:** 1.0.1 (21 Oct 2026). Delivered as `mind-desk-1.0.1.zip` + `mind-desk-1.0.1-TEST-REPORT.md` + `mind-desk-1.0.1-tests.zip`.
+**Current version:** 1.0.2 (21 Oct 2026). Delivered as `mind-desk-1.0.2.zip` + `mind-desk-1.0.2-TEST-REPORT.md` + `mind-desk-1.0.2-tests.zip`.
 
 **Reviews:** ChatGPT review of 1.0.0: 17 testable points (R1–R15, R17, R18) all confirmed by tests failing on 1.0.0 and fixed in 1.0.1; R16 (`OLLAMA_ORIGINS=*`) is a trade-off, see D20. Review tests: `tests/review-tests.js`.
+ChatGPT review of 1.0.1: 17 testable points (S1–S17) all confirmed by tests failing on 1.0.1 and fixed in 1.0.2; S18 (real-model trial) still open. Tests: `tests/review2-tests.js`.
 
 ## Owner context
 - Writes notes fast in ~10 Notepad tabs and some Google Keep notes: heavy typos, mixed topics in one tab, private shortcodes (IGS, hs, FT, HL2, DG, BR, ER…), no dates.
@@ -15,11 +16,11 @@
 - `src/core.js` pure logic (blocks, prompts, JSON parsing, guardrails, diff, Markdown). Exposed as `window.MDCore`.
 - `src/app.js` interface, AI calls, run loop, storage, folder sync. Debug handle `window.MD`.
 - `src/style.css`, `src/index.html`; `node bin/build.js` → `mind-desk.html` (committed). `--zip` → `dist/`.
-- Data: one IndexedDB record `state` (with a `rev` number checked on every save) (notes, items, tasks, categories, words, rules, prompts, settings, survey) + `folder` (directory handle).
+- Data: one IndexedDB record `state` (with a `rev` number checked on every save) (notes, items, tasks, categories, words, rules, prompts, settings, survey) + `folder` (directory handle) + `recovery` (unsaved copy from a window that lost control).
 - Item status: `pending` (split, waiting for AI) → `review` → `approved`. Note status `new` → `split`.
 
 ## Tests
-`PW=<playwright path> node tests/run-tests.js [mind-desk.html]` — 24 browser tests from a `file://` URL with `tests/fake-ollama.js`. `REAL_OLLAMA=…` adds a real-Ollama connection check. `node tests/review-tests.js [html]` — 18 tests for the review points. Results in `tests/last-*.json`.
+`PW=<playwright path> node tests/run-tests.js [mind-desk.html]` — 24 browser tests from a `file://` URL with `tests/fake-ollama.js`. `REAL_OLLAMA=…` adds a real-Ollama connection check. `node tests/review-tests.js [html]` — 18 tests for review 1; `node tests/review2-tests.js [html]` — 17 tests for review 2 (`ONLY=S3` runs one). Results in `tests/last-*.json`.
 
 ## Not tested yet
 - A real model's quality on the owner's notes (no model download possible in the build sandbox). First real run will need prompt tuning.

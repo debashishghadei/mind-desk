@@ -22,3 +22,10 @@ Numbered so both AIs (Claude and ChatGPT) and the owner can refer to them. Newes
 - **D18 Context size grows with the note** (estimate chars/3.2 + answer + 768, rounded up, max 32,768). Larger items must be split by the user.
 - **D19 Busy rule.** While the AI runs, actions that delete or replace data are blocked; late answers for deleted items are dropped.
 - **D20 OLLAMA_ORIGINS=* stays for now** (review point R16 is a fair trade-off point). Alternative for later, owner's choice: a launcher that serves Mind Desk from `http://127.0.0.1:<port>`, which Ollama allows by default, so `*` is no longer needed (data would move to that address once).
+- **D21 (21 Oct 2026, review of 1.0.1) One write at a time**; a change during a write is written right after. Folder bookkeeping saves never schedule another folder copy.
+- **D22 Recovery copy.** A window that loses control with unsaved work stores it under a separate key (`recovery`), never over the main data; the window in charge shows it (on start and when the window gets focus) to download, use or delete.
+- **D23 Folder writes are abandoned when control is lost** (checked before writing and before `close()`, which is when a file is replaced).
+- **D24 Ids are simple** (`[A-Za-z0-9_-]{1,64}`, checked on restore) and always escaped in HTML / `CSS.escape` in selectors.
+- **D25 Split originals by word alignment** with typo tolerance (up to ~2,000 words per side); beyond that an approximate cut at the same share of words, flagged `splitguess`.
+- **D26 Meaning checks v2:** comparison line by line (fast, no false alarm on long notes); numbers in order (words like 2day/b2b are not numbers; 14th, 10k, 1L, 50% are); "not"-words per line with the first letter of the next word; done/support judged per clause (split at line, `;`, `,`, `..`); a task needs ≥ 75% of its words in the note (typos and short forms count).
+- **D27 Lock failure is not fatal:** if Web Locks fail, Mind Desk runs with the revision check only and shows "one-window check off".

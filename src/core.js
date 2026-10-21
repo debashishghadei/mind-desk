@@ -185,7 +185,7 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
   function protectedTerms(text, words) {
     const set = new Set();
     for (const w of words) if (w.term && new RegExp('(^|[^\\w])' + reEsc(w.term) + '(?![\\w])').test(text)) set.add(w.term);
-    for (const m of String(text).matchAll(/\b[A-Z][A-Z0-9]{1,5}\b/g)) set.add(m[0]);
+    for (const m of String(text).matchAll(/\b[A-Z][A-Z0-9]{1,5}\b/g)) if (!new RegExp('^' + NEG_SRC + '$', 'i').test(m[0])) set.add(m[0]); // "CANT", "NOT" are words, not codes
     for (const m of String(text).matchAll(/(?:https?:\/\/|www\.)[^\s<>"]+|[\w.+-]+@[\w-]+\.[\w.-]+/g)) set.add(m[0].replace(/[.,;:!?)]+$/, ''));
     return [...set];
   }
@@ -225,37 +225,57 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
   /* ---------- checking AI results ---------- */
   function words(s) { return String(s).split(/\s+/).filter(Boolean); }
 
-  /** word-level diff (LCS). returns [{t:'eq'|'del'|'ins', s}] */
-  function diff(a, b) {
-    const A = String(a).split(/(\s+)/), B = String(b).split(/(\s+)/);
-    const n = A.length, m = B.length;
-    if (n * m > 4e6) return [{ t: 'del', s: a }, { t: 'ins', s: b }];
-    const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
-    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-    const out = []; let i = 0, j = 0;
-    const push = (t, s) => { const l = out[out.length - 1]; if (l && l.t === t) l.s += s; else out.push({ t, s }); };
-    while (i < n && j < m) {
-      if (A[i] === B[j]) { push('eq', A[i]); i++; j++; } else if (dp[i + 1][j] >= dp[i][j + 1]) { push('del', A[i]); i++; } else { push('ins', B[j]); j++; }
+  /** LCS on token arrays after trimming the common start and end (so one small change in a long text is cheap) */
+  function lcsOps(A, B, limit) {
+    let s = 0; while (s < A.length && s < B.length && A[s] === B[s]) s++;
+    let e = 0; while (e < A.length - s && e < B.length - s && A[A.length - 1 - e] === B[B.length - 1 - e]) e++;
+    const a = A.slice(s, A.length - e), b = B.slice(s, B.length - e);
+    const ops = A.slice(0, s).map((x) => ['eq', x]);
+    const n = a.length, m = b.length;
+    if (n * m > limit) { a.forEach((x) => ops.push(['del', x])); b.forEach((x) => ops.push(['ins', x])); } else {
+      const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+      for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      let i = 0, j = 0;
+      while (i < n && j < m) { if (a[i] === b[j]) { ops.push(['eq', a[i]]); i++; j++; } else if (dp[i + 1][j] >= dp[i][j + 1]) ops.push(['del', a[i++]]); else ops.push(['ins', b[j++]]); }
+      while (i < n) ops.push(['del', a[i++]]); while (j < m) ops.push(['ins', b[j++]]);
     }
-    while (i < n) push('del', A[i++]);
-    while (j < m) push('ins', B[j++]);
+    A.slice(A.length - e).forEach((x) => ops.push(['eq', x]));
+    return ops;
+  }
+  /** word-level diff for display: lines first, then words inside changed lines. returns [{t:'eq'|'del'|'ins', s}] */
+  function diff(a, b) {
+    a = String(a); b = String(b);
+    if (a === b) return a ? [{ t: 'eq', s: a }] : [];
+    const out = []; const push = (t, s) => { if (!s) return; const l = out[out.length - 1]; if (l && l.t === t) l.s += s; else out.push({ t, s }); };
+    const L = (x) => x.match(/[^\n]*\n|[^\n]+$/g) || [];
+    const lines = lcsOps(L(a), L(b), 4e6);
+    let dels = [], inss = [];
+    const flush = () => {
+      if (dels.length || inss.length) {
+        for (const [t, s] of lcsOps(dels.join('').split(/(\s+)/).filter((x) => x !== ''), inss.join('').split(/(\s+)/).filter((x) => x !== ''), 4e6)) push(t, s);
+      }
+      dels = []; inss = [];
+    };
+    for (const [t, s] of lines) { if (t === 'eq') { flush(); push('eq', s); } else if (t === 'del') dels.push(s); else inss.push(s); }
+    flush();
     return out;
   }
   function changeRatio(a, b) {
     const wa = words(a), wb = words(b); if (!wa.length) return 0;
-    const n = wa.length, m = wb.length;
-    if (n * m > 4e6) return 1;
-    const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
-    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = wa[i] === wb[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-    return 1 - dp[0][0] / Math.max(n, m);
+    const ops = lcsOps(wa, wb, 1e7);
+    return 1 - ops.filter((o) => o[0] === 'eq').length / Math.max(wa.length, wb.length);
   }
   function countTerm(text, term) {
     const re = new RegExp('(^|[^\\w])' + reEsc(term) + '(?![\\w])', 'g');
     return (String(text).match(re) || []).length;
   }
-  /** character edit distance (Levenshtein), two rows; null when too long to compute quickly */
+  /** character edit distance (Levenshtein) after trimming the common start/end; null when still too long */
   function editDistance(a, b) {
     a = String(a); b = String(b);
+    let s = 0; while (s < a.length && s < b.length && a[s] === b[s]) s++;
+    let e = 0; while (e < a.length - s && e < b.length - s && a[a.length - 1 - e] === b[b.length - 1 - e]) e++;
+    a = a.slice(s, a.length - e); b = b.slice(s, b.length - e);
+    if (!a.length || !b.length) return Math.max(a.length, b.length);
     if (a.length * b.length > 1.6e7) return null;
     let prev = new Uint32Array(b.length + 1), cur = new Uint32Array(b.length + 1);
     for (let j = 0; j <= b.length; j++) prev[j] = j;
@@ -266,18 +286,77 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     }
     return prev[b.length];
   }
-  const NEG = /\b(not|no|never|nothing|none|don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|can'?t|cannot|couldn'?t|isn'?t|aren'?t|wasn'?t|weren'?t|shouldn'?t|mustn'?t|haven'?t|hasn'?t|nahi|nahin|mat)\b/gi;
-  const DONE = /(\b(done|did|finished|completed?|already|sent|paid|bought|called)\b|\(done|✓|✔|\[x\])/i;
-  const STOP = new Set(['the', 'and', 'for', 'with', 'about', 'from', 'that', 'this', 'into', 'your', 'my', 'some', 'more', 'have', 'will', 'then', 'also', 'make', 'call', 'buy', 'get', 'do', 'to', 'of', 'on', 'in', 'a', 'an']);
-  const numbersOf = (t) => (String(t).match(/\d+(?:[.,:/]\d+)*/g) || []).sort().join('|');
-  const contentWords = (t) => (String(t).toLowerCase().match(/[a-z0-9]{3,}/g) || []).filter((w) => !STOP.has(w));
-  /** does the note support this task? (shares a word; the line it comes from is not negated) */
+  /** characters changed between two texts, measured line by line (fast for long notes). {dist, len} */
+  function charChange(a, b) {
+    a = String(a); b = String(b);
+    if (a === b) return { dist: 0, len: a.length };
+    const ops = lcsOps(a.split('\n'), b.split('\n'), 4e6);
+    let dist = 0, dels = [], inss = [];
+    const flush = () => {
+      const n = Math.max(dels.length, inss.length);
+      for (let k = 0; k < n; k++) {
+        const x = dels[k] || '', y = inss[k] || '';
+        const d = editDistance(x, y);
+        dist += d === null ? Math.round(changeRatio(x, y) * Math.max(x.length, y.length)) : d;
+      }
+      dels = []; inss = [];
+    };
+    for (const [t, s] of ops) { if (t === 'eq') flush(); else if (t === 'del') dels.push(s); else inss.push(s); }
+    flush();
+    return { dist, len: Math.max(a.length, b.length, 1) };
+  }
+
+  /* --- meaning checks --- */
+  const quotes = (t) => String(t).replace(/[’‘`´]/g, "'");
+  const NEG_SRC = "\\b(not|nto|no|never|nothing|none|don'?t|dnt|doesn'?t|didn'?t|won'?t|wouldn'?t|can'?t|cannot|couldn'?t|isn'?t|aren'?t|wasn'?t|weren'?t|shouldn'?t|mustn'?t|haven'?t|hasn'?t|nahi|nahin|mat)\\b";
+  const NEG = new RegExp(NEG_SRC, 'gi');
+  const hasNeg = (t) => new RegExp(NEG_SRC, 'i').test(quotes(t));
+  /** where the "not"-words are: per line, each with the first letter of the word after it */
+  function negSigns(text) {
+    return quotes(text).split('\n').map((ln) => {
+      const out = []; const re = new RegExp(NEG_SRC + "\\W*([A-Za-z0-9]?)", 'gi'); let m;
+      while ((m = re.exec(ln))) out.push((m[2] || '').toLowerCase());
+      return out.sort().join(',');
+    });
+  }
+  function negationChanged(a, b) {
+    const x = negSigns(a), y = negSigns(b);
+    if (x.length === y.length) return x.some((v, k) => v !== y[k]);
+    return x.filter(Boolean).join('|').split(/[|,]/).sort().join() !== y.filter(Boolean).join('|').split(/[|,]/).sort().join();
+  }
+  // numbers in order; "2day", "b2b" or "4u" are words, not numbers; 14th, 10k, 1L, 50% are numbers
+  const numbersOf = (t) => (String(t).match(/(?<![A-Za-z0-9])\d+(?:[.,:/]\d+)*(?:st|nd|rd|th|k|K|L|cr|%)?(?![A-Za-z0-9])/g) || []).join('|');
+  const DONE = /(\b(done|did|finished|completed?|already|sent|paid|bought|called|ho gaya|hogaya)\b|\(done|✓|✔|\[x\])/i;
+  const NOT_DONE = /\b(not|nto|nahi)\s+(yet\s+)?(done|finished|completed?|sent|paid)\b|\bpending\b|\b(not\s+yet|yet\s+to)\b/i;
+  const STOP = new Set(['the', 'and', 'or', 'for', 'with', 'about', 'from', 'that', 'this', 'into', 'your', 'my', 'his', 'her', 'it', 'its', 'some', 'more', 'also', 'then', 'to', 'of', 'on', 'in', 'at', 'a', 'an', 'is', 'be', 'by', 'please', 'need', 'needs', 'will', 'should', 'must', 'can']);
+  const wordsLower = (t) => (quotes(t).toLowerCase().match(/[a-z0-9]+/g) || []);
+  const contentWords = (t) => wordsLower(t).filter((w) => w.length >= 2 && !STOP.has(w));
+  const clauses = (t) => quotes(t).split(/[\n;,]|\.{2,}|\.\s+|\s+-\s+/).map((x) => x.trim()).filter(Boolean);
+  /** same word, a typo of it, a longer form ("call"/"called") or a short form ("ppt" for "powerpoint") */
+  function wordMatch(w, n) {
+    if (w === n) return true;
+    if (w.length >= 4 && n.length >= 4 && w.slice(0, 4) === n.slice(0, 4)) return true;
+    const d = editDistance(w, n); if (d !== null && d <= (Math.max(w.length, n.length) >= 6 ? 2 : 1) && Math.min(w.length, n.length) >= 3) return true;
+    const isAbbr = (s, l) => s.length >= 2 && s.length < l.length && s[0] === l[0] && [...s].every(((i) => (c) => (i = l.indexOf(c, i) + 1) > 0)(0));
+    return isAbbr(n, w) || isAbbr(w, n);
+  }
+  /** clauses of the note that talk about this task (share at least one of its words) */
+  function taskClauses(task, note) {
+    const tw = contentWords(task);
+    return clauses(note).filter((c) => contentWords(c).some((n) => tw.some((w) => wordMatch(w, n))));
+  }
+  /** does the note support this task? Most of its words are in the note, and the note does not say "not" about it */
   function taskSupport(task, original, fixed) {
-    const tw = contentWords(task).map((w) => w.slice(0, 4));
-    if (!tw.length) return true;
-    const lines = (original + '\n' + fixed).split('\n').filter((ln) => contentWords(ln).some((w) => tw.includes(w.slice(0, 4))));
-    if (!lines.length) return false;
-    return !lines.every((ln) => { NEG.lastIndex = 0; return NEG.test(ln); });
+    const tw = contentWords(task); if (!tw.length) return true;
+    const nw = contentWords(original + ' ' + fixed);
+    const found = tw.filter((w) => nw.some((n) => wordMatch(w, n))).length;
+    if (found / tw.length < 0.75) return false;
+    const cl = taskClauses(task, original);
+    return !cl.length || !cl.every(hasNeg);
+  }
+  /** a task counts as done only if the part of the note it comes from says so */
+  function taskDone(task, original) {
+    return taskClauses(task, original).some((c) => DONE.test(c) && !NOT_DONE.test(c));
   }
 
   /** clean an organize answer and decide which warnings to show */
@@ -299,12 +378,12 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     const area = (id) => { const c = todoSubs(cats).find((s) => s.area && subtreeIds(cats, s.area).includes(id)); return c ? c.id : null; };
     let taskWarn = false;
     const tasks = (Array.isArray(r.tasks) ? r.tasks : []).filter((t) => t && String(t.text || '').trim()).map((t) => {
-      const text = String(t.text).trim().slice(0, 300);
-      if (!taskSupport(text, original, typeof r.text === 'string' ? r.text : '')) taskWarn = true;
+      const ttext = String(t.text).trim().slice(0, 300);
+      if (!taskSupport(ttext, original, text)) taskWarn = true;
       return {
-        text,
-        // "done" needs a sign in the note itself; otherwise the task stays open
-        done: (t.done === true || t.done === 'true') && DONE.test(original),
+        text: ttext,
+        // "done" needs a sign in the part of the note this task comes from; otherwise the task stays open
+        done: (t.done === true || t.done === 'true') && taskDone(ttext, original),
         cat: subs.includes(t.category) ? t.category : (area(category) || subs[0] || 'todo'),
       };
     });
@@ -313,13 +392,13 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     if (!title) title = words(text).slice(0, 7).join(' ');
     // guardrails: the typo fix must not change meaning
     const wo = words(original).length, wt = words(text).length;
-    const norm = (t) => String(t).toLowerCase().replace(/\s+/g, ' ').trim();
+    const norm = (t) => quotes(t).toLowerCase().replace(/[ \t]+/g, ' ').trim();
     const a = norm(original), b = norm(text);
     if ((wo >= 6 && wt < wo * 0.8) || b.length < a.length * 0.7) flags.push('shortened');
-    const dist = editDistance(a, b);
-    if (dist === null ? changeRatio(original, text) > 0.35 : dist > 4 && dist / Math.max(a.length, b.length, 1) > 0.3) flags.push('bigchange');
-    if (numbersOf(original) !== numbersOf(text)) flags.push('numbers');
-    if ((text.match(NEG) || []).length < (original.match(NEG) || []).length) flags.push('negation');
+    const ch = charChange(a, b);
+    if (ch.dist > 4 && ch.dist / ch.len > 0.3) flags.push('bigchange');
+    if (numbersOf(quotes(original)) !== numbersOf(quotes(text))) flags.push('numbers');
+    if (negationChanged(original, text)) flags.push('negation');
     const lost = protectedTerms(original, ctx.words).filter((t) => countTerm(text, t) < countTerm(original, t));
     if (lost.length) flags.push('lostword');
     return { title, category, tags, tasks, text, flags, lost };
@@ -406,6 +485,34 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     for (const [i, t] of o.tasks.entries()) if (!isObj(t) || !str(t.id) || !str(t.text) || !str(t.cat) || typeof t.done !== 'boolean' || !(t.itemId === null || t.itemId === undefined || str(t.itemId))) return `Task number ${i + 1} is damaged.`;
     const dup = uniq(o.notes, 'notes') || uniq(o.items, 'items') || uniq(o.tasks, 'tasks') || uniq(o.categories, 'categories');
     if (dup) return dup;
+    // ids end up inside the page, so they may only use simple characters
+    const ID = /^[A-Za-z0-9_-]{1,64}$/;
+    for (const [list, what] of [[o.notes, 'note'], [o.items, 'item'], [o.tasks, 'task'], [o.categories, 'category']]) {
+      const bad = list.find((x) => !ID.test(x.id)); if (bad) return `A ${what} has an id with characters that are not allowed.`;
+    }
+    const strs = (a) => Array.isArray(a) && a.every(str);
+    for (const it of o.items) {
+      if (!strs(it.tags) || (it.flags !== undefined && !strs(it.flags)) || (it.lost !== undefined && !strs(it.lost))) return 'An item has damaged tags or warnings.';
+      if ((it.title !== undefined && !str(it.title)) || (it.order !== undefined && typeof it.order !== 'number') || (it.createdAt !== undefined && typeof it.createdAt !== 'number')) return 'An item has a damaged title, order or date.';
+    }
+    for (const c of o.categories) if ((c.desc !== undefined && c.desc !== null && !str(c.desc)) || (c.area !== undefined && c.area !== null && !str(c.area))) return `Category “${c.name}” is damaged.`;
+    for (const sys of ['todo', 'unsorted']) { const c = o.categories.find((x) => x.id === sys); if (c && c.parent) return `The built-in category “${c.name}” cannot be inside another category.`; }
+    for (const c of o.categories) if (c.area && !o.categories.some((x) => x.id === c.area && !x.parent)) return `Category “${c.name}” links its tasks to a missing category.`;
+    if (o.survey !== undefined && o.survey !== null) {
+      if (!isObj(o.survey) || !Array.isArray(o.survey.questions)) return 'The open questions in the backup are damaged.';
+      for (const q of o.survey.questions) {
+        if (!isObj(q) || !str(q.id) || !ID.test(q.id) || !['word', 'intent'].includes(q.kind)) return 'An open question in the backup is damaged.';
+        if (q.kind === 'word' ? !str(q.term) : !(str(q.quote) && str(q.question))) return 'An open question in the backup is damaged.';
+        if (q.guess !== undefined && !str(q.guess)) return 'An open question in the backup is damaged.';
+      }
+      if (o.survey.draft !== undefined && (!isObj(o.survey.draft) || !Object.values(o.survey.draft).every(str))) return 'The draft answers in the backup are damaged.';
+    }
+    if (o.prompts !== undefined && (!isObj(o.prompts) || !Object.values(o.prompts).every((v) => v === null || str(v)))) return 'The AI instructions in the backup are damaged.';
+    if (o.settings !== undefined) {
+      if (!isObj(o.settings)) return 'The settings in the backup are damaged.';
+      for (const [k, v] of Object.entries(o.settings)) if (v !== null && !['string', 'number', 'boolean'].includes(typeof v)) return `The setting “${k}” in the backup is damaged.`;
+    }
+    for (const t of o.tasks) if (t.createdAt !== undefined && typeof t.createdAt !== 'number') return 'A task has a damaged date.';
     const catIds = new Set(o.categories.map((c) => c.id)); const noteIds = new Set(o.notes.map((n) => n.id)); const itemIds = new Set(o.items.map((i) => i.id));
     for (const c of o.categories) {
       if (c.parent && !catIds.has(c.parent)) return `Category “${c.name}” points to a missing parent.`;
@@ -419,35 +526,64 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
       if (t.itemId && !itemIds.has(t.itemId)) return 'A task points to an item that is not in the backup.';
       if (!catIds.has(t.cat)) return 'A task points to a to-do list that is not in the backup.';
     }
-    if (o.words !== undefined && (!Array.isArray(o.words) || o.words.some((w) => !isObj(w) || !str(w.term)))) return 'The word list is damaged.';
+    if (o.words !== undefined && (!Array.isArray(o.words) || o.words.some((w) => !isObj(w) || !str(w.term) || !(w.meaning === undefined || str(w.meaning)) || !(w.id === undefined || (str(w.id) && ID.test(w.id)))))) return 'The word list is damaged.';
     if (o.rules !== undefined && (!Array.isArray(o.rules) || o.rules.some((r) => !str(r)))) return 'The rule list is damaged.';
     return '';
   }
   function validBackup(o) { return !backupProblem(o); }
 
-  /** after "---" splits edited text, find the matching pieces of the original (typo) text */
+  /**
+   * After "---" splits the edited text, find the matching pieces of the original (typo) text.
+   * Words are lined up allowing typos ("wnat" ~ "want", "mov eon" ~ "move on"). For very long texts the cut is
+   * placed at the same share of words. The result is always cut from the original text; .approx marks a guess.
+   */
   function splitOriginal(original, parts) {
-    const joined = parts.join('\n');
-    const d = diff(original, joined);
-    const mapPos = (pb) => {
-      let a = 0, b = 0;
-      for (const t of d) {
-        const len = t.s.length;
-        if (t.t === 'eq') { if (pb <= b + len) return a + (pb - b); a += len; b += len; } else if (t.t === 'del') a += len; else { if (pb <= b + len) return a; b += len; }
+    const toks = (t) => { const out = []; const re = /\S+/g; let m; while ((m = re.exec(t))) out.push({ w: m[0].toLowerCase(), at: m.index }); return out; };
+    const A = toks(original);
+    const B = []; const cutsB = []; // word index in B where part k (k>0) starts
+    parts.forEach((p, k) => { if (k) cutsB.push(B.length); for (const t of toks(p)) B.push(t); });
+    const n = A.length, m = B.length;
+    let approx = false; let cutsA;
+    const sim = (x, y) => {
+      if (x === y) return 2;
+      const d = editDistance(x, y); const L = Math.max(x.length, y.length);
+      if (d !== null && d <= Math.max(1, Math.floor(L / 2))) return 1;
+      if (x.length >= 2 && y.length >= 2 && (y.startsWith(x) || x.startsWith(y))) return 1; // "mov" / "move"
+      return -1;
+    };
+    if (n && m && n * m <= 4e6) {
+      // global alignment, keep for each B word the A word it lines up with (or the next one)
+      const W = m + 1; const score = new Int32Array((n + 1) * W); const move = new Uint8Array((n + 1) * W);
+      for (let i = 1; i <= n; i++) { score[i * W] = -i; move[i * W] = 1; }
+      for (let j = 1; j <= m; j++) { score[j] = -j; move[j] = 2; }
+      for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) {
+        const d = score[(i - 1) * W + j - 1] + sim(A[i - 1].w, B[j - 1].w), u = score[(i - 1) * W + j] - 1, l = score[i * W + j - 1] - 1;
+        if (d >= u && d >= l) { score[i * W + j] = d; move[i * W + j] = 0; } else if (u >= l) { score[i * W + j] = u; move[i * W + j] = 1; } else { score[i * W + j] = l; move[i * W + j] = 2; }
       }
-      return a;
-    };
-    const snap = (pos) => {
-      if (pos <= 0 || original[pos - 1] === '\n') return pos;
-      const back = original.lastIndexOf('\n', pos), fwd = original.indexOf('\n', pos);
-      const cands = [back + 1, fwd + 1].filter((x) => x > 0 && Math.abs(x - pos) <= 60);
-      return cands.length ? cands.sort((x, y) => Math.abs(x - pos) - Math.abs(y - pos))[0] : pos;
-    };
-    const cuts = [0]; let off = 0;
-    for (let k = 0; k < parts.length - 1; k++) { off += parts[k].length + 1; cuts.push(snap(mapPos(off))); }
-    cuts.push(original.length);
-    const out = parts.map((p, k) => original.slice(cuts[k], Math.max(cuts[k], cuts[k + 1])).trim());
-    return out.some((x) => !x) ? parts.slice() : out;
+      const mapB = new Int32Array(m + 1).fill(-1); mapB[m] = n; let i = n, j = m;
+      while (i > 0 || j > 0) {
+        const mv = i > 0 && j > 0 ? move[i * W + j] : i > 0 ? 1 : 2;
+        if (mv === 0) { mapB[j - 1] = i - 1; i--; j--; } else if (mv === 1) i--; else { mapB[j - 1] = -1; j--; }
+      }
+      for (let k = m - 1; k >= 0; k--) if (mapB[k] < 0) mapB[k] = mapB[k + 1]; // an extra word maps to the next aligned one
+      cutsA = cutsB.map((cb) => mapB[cb]);
+    } else { approx = true; cutsA = cutsB.map((cb) => Math.round((cb / Math.max(m, 1)) * n)); }
+    // character positions in the original; prefer starting a part at the beginning of a line
+    const pos = cutsA.map((ia) => {
+      if (ia >= n) return original.length;
+      let p = A[ia].at; const ls = original.lastIndexOf('\n', p - 1) + 1;
+      if (/^\s*$/.test(original.slice(ls, p))) p = ls;
+      return p;
+    });
+    const bounds = [0, ...pos, original.length];
+    for (let k = 1; k < bounds.length; k++) if (bounds[k] < bounds[k - 1]) bounds[k] = bounds[k - 1];
+    let out = parts.map((_, k) => original.slice(bounds[k], bounds[k + 1]).trim());
+    if (out.some((x) => !x)) { // never relabel cleaned text as original: fall back to an even share of the original
+      approx = true; const per = original.length / parts.length;
+      out = parts.map((_, k) => original.slice(Math.round(per * k), k === parts.length - 1 ? original.length : Math.round(per * (k + 1))).trim());
+    }
+    out.approx = approx;
+    return out;
   }
 
   return {
@@ -455,7 +591,7 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     makeBlocks, groupsFromStarts, blockWindows, parseJSON, fill, protectedTerms, buildSplitPrompt, buildSurveyPrompt,
     buildOrganizePrompt, bulkSplitPrompt, bulkOrganizePrompt, bulkSurveyPrompt, diff, changeRatio, countTerm, checkOrganize,
     checkSurvey, fmtDate, safeName, categoryMarkdown, allMarkdown, visibleTasks, validBackup, backupProblem, itemsIn, linkedTasks,
-    editDistance, splitOriginal, taskSupport,
+    editDistance, splitOriginal, taskSupport, taskDone, charChange, wordMatch,
   };
 })();
 if (typeof window !== 'undefined') window.MDCore = MDCore;

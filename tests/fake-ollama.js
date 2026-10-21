@@ -59,6 +59,8 @@ function start(port, opts = {}) {
         if (/Decide where each NEW separate item starts/.test(sys)) {
           const blocks = [...user.matchAll(/\[(\d+)\][^\n]*\n([^\n]*)/g)].map((m) => ({ n: +m[1], first: m[2] }));
           out = /JOINALL/.test(user) ? { starts: [1] } : { starts: blocks.filter((b) => !/^(sol|and also)\b/i.test(b.first)).map((b) => b.n) };
+        } else if (/Find at most/.test(sys) && /BADSURVEY/.test(user)) {
+          return reply(res, 200, { message: { content: 'no idea, sorry' } }, origin, allowAll);
         } else if (/Find at most/.test(sys)) {
           const known = (sys.split('Already explained words:')[1] || '').split('\n').map((l) => l.split(' = ')[0].trim().toLowerCase());
           const terms = [...new Set([...user.matchAll(/\b[A-Z][A-Z0-9]{1,5}\b/g)].map((m) => m[0]))].filter((t) => !['CEO', 'SEO', 'AI'].includes(t) && !known.includes(t.toLowerCase()));

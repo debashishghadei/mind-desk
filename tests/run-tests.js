@@ -91,7 +91,7 @@ async function test(name, fn) {
       const b = MDCore.checkOrganize({ title: '', category: 'Personal goals', tags: [], tasks: [], text: orig.replace('stoped', 'stopped') }, orig, ctx);
       return { a, b };
     });
-    assert.deepStrictEqual(r.a.flags.sort(), ['bigchange', 'lostword', 'shortened', 'unsorted']);
+    assert.deepStrictEqual(r.a.flags.sort(), ['bigchange', 'lostword', 'shortened', 'taskcheck', 'unsorted']); // 1.0.2: the made-up task "do it" is flagged
     assert.strictEqual(r.a.category, 'unsorted'); assert.deepStrictEqual(r.a.tags, ['job']); assert.deepStrictEqual(r.a.lost, ['IGS']);
     assert.strictEqual(r.a.tasks[0].done, false, '1.0.1: done needs a sign in the note'); assert.ok(r.a.tasks[0].cat.startsWith('todo-'));
     assert.deepStrictEqual(r.b.flags, []); assert.strictEqual(r.b.category, 'personal'); assert.ok(r.b.title.length > 0);

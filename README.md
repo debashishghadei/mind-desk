@@ -18,7 +18,7 @@ Everything runs on your PC: one file in Microsoft Edge or Google Chrome, talking
 2. Double-click **Open Mind Desk.bat**. (Or double-click `mind-desk.html` to open it in a normal browser tab.)
 3. Optional: right-click its icon on the taskbar → **Pin to taskbar**.
 
-Always open it the same way in the same browser. Your notes are stored in that browser on this PC. Only one Mind Desk window works at a time; a second one offers **Use Mind Desk here**.
+Always open it the same way in the same browser. Your notes are stored in that browser on this PC. Only one Mind Desk window works at a time; a second one offers **Use Mind Desk here**. If the other window had changes that were not saved yet, Mind Desk keeps a copy and shows it to you.
 
 ## Connect Ollama (one time, about 10 minutes)
 
@@ -59,5 +59,5 @@ Replace `mind-desk.html` (and the `.bat`) with the new files. Your data stays.
 ## For developers
 
 - Source: `src/` (`core.js` logic, `app.js` interface, `style.css`, `index.html`). Build the single file with `node bin/build.js` (`--zip` also makes `dist/mind-desk-<version>.zip`).
-- Tests: `tests/run-tests.js` runs Chromium (Playwright) against `mind-desk.html` opened from a `file://` URL, with a stand-in Ollama (`tests/fake-ollama.js`). `REAL_OLLAMA=http://127.0.0.1:11434` adds a check against a real Ollama. `tests/review-tests.js` covers the review points (R1–R18).
+- Tests: `tests/run-tests.js` runs Chromium (Playwright) against `mind-desk.html` opened from a `file://` URL, with a stand-in Ollama (`tests/fake-ollama.js`). `REAL_OLLAMA=http://127.0.0.1:11434` adds a check against a real Ollama. `tests/review-tests.js` and `tests/review2-tests.js` cover the two review rounds.
 - Shared notes for the AIs working on this repo: `HANDOFF.md`, `DECISIONS.md`.

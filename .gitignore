@@ -1,4 +1,4 @@
 dist/
 node_modules/
-tests/last-results.json
+tests/last-*.json
 *.log
