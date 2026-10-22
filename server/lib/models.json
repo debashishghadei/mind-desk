@@ -1,0 +1,15 @@
+{
+  "_source": "Official price pages (platform.claude.com/docs/en/about-claude/pricing, developers.openai.com/api/docs/pricing), checked 22 Oct 2026. US$ per million tokens: [input, output].",
+  "anthropic": [
+    { "id": "claude-haiku-5-5", "name": "Claude Haiku 5.5", "short": "Haiku", "note": "fast, cheapest", "price": [0.10, 0.50], "longPrice": [0.50, 2.50], "longFrom": 100000 },
+    { "id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5", "short": "Sonnet", "note": "balanced", "price": [2, 10] },
+    { "id": "claude-opus-5-5", "name": "Claude Opus 5.5", "short": "Opus", "note": "deepest, costs more", "price": [4, 20] },
+    { "id": "claude-fable-5-1", "name": "Claude Fable 5.1", "short": "Fable", "note": "most capable, most expensive", "price": [10, 50] }
+  ],
+  "openai": [
+    { "id": "gpt-6-luna", "name": "GPT-6 Luna", "short": "Luna", "note": "small, cheapest", "price": [0.10, 0.50] },
+    { "id": "gpt-6.1-sol", "name": "GPT-6.1 Sol", "short": "Sol", "note": "balanced", "price": [2, 10] },
+    { "id": "gpt-6-astra", "name": "GPT-6 Astra", "short": "Astra", "note": "flagship, expensive", "price": [10, 50] }
+  ],
+  "defaults": { "anthropic": ["claude-haiku-5-5", "claude-sonnet-5-5"], "openai": ["gpt-6-luna", "gpt-6.1-sol"] }
+}

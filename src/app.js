@@ -7,7 +7,11 @@
      "artifact" (mind-desk-artifact.html, published on claude.ai: Claude answers, notes live in the artifact's private storage). */
   const TARGET = '__TARGET__';
   const ART = TARGET === 'artifact';
-  const PLAT = ART ? window.MDArtifact : null; // artifact platform (storage, Claude, downloads)
+  const CLOUD = TARGET === 'cloud'; // third build (1.3.0): your own server, login, quick capture, optional paid API
+  const REMOTE = ART || CLOUD; // notes are saved somewhere else than this browser
+  const PLAT = ART ? window.MDArtifact : CLOUD ? window.MDCloud : null; // platform (storage, AI, downloads)
+  /** providers that take many notes per request (Claude in the artifact, your API key in the cloud) */
+  const bigAI = () => S.settings.provider === 'claude' || S.settings.provider === 'api';
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -61,7 +65,7 @@
     },
   };
   // the artifact keeps notes in the artifact's private database (falls back to this browser's storage when there is none)
-  const store = ART ? PLAT.makeStore(pcStore) : pcStore;
+  const store = PLAT ? PLAT.makeStore(pcStore) : pcStore;
 
   function defaultSettings() {
     return {
@@ -71,7 +75,8 @@
       oaUrl: 'http://localhost:3001/api/v1/openai', oaKey: '', oaModel: '', manualBatch: 20, survey: true, surveyMax: 8, theme: 'auto',
       claudeFast: 'auto', claudeCareful: 'auto', claudeEffort: 'auto', // artifact: which Claude answers in Fast / Careful
       chatAll: true, // artifact: the chat reads all notes (Claude can take them; the PC's small model cannot)
-      ...(ART ? { provider: 'claude' } : {}),
+      apiVendor: 'anthropic', apiFast: '', apiCareful: '', // cloud: your own API key (models chosen in Settings)
+      ...(ART ? { provider: 'claude' } : CLOUD ? { provider: 'manual' } : {}),
     };
   }
   function defaultState() {
@@ -90,7 +95,9 @@
     for (const k of ['claudeFast', 'claudeCareful']) if (out.settings[k] !== 'auto' && !CLAUDE_MODELS.some((m) => m.id === out.settings[k])) out.settings[k] = 'auto';
     if (!['auto', 'low', 'medium', 'high'].includes(out.settings.claudeEffort)) out.settings.claudeEffort = 'auto';
     if (ART) { out.settings.provider = 'claude'; out.settings.theme = 'auto'; } // the artifact always uses Claude and the viewer's theme
-    else if (out.settings.provider === 'claude') out.settings.provider = 'ollama'; // a backup from the artifact, restored on the PC
+    else if (out.settings.provider === 'claude') out.settings.provider = CLOUD ? 'manual' : 'ollama'; // a backup from the artifact, restored here
+    if (!CLOUD && out.settings.provider === 'api') out.settings.provider = 'ollama'; // the API key only works through the cloud server
+    if (!['anthropic', 'openai'].includes(out.settings.apiVendor)) out.settings.apiVendor = 'anthropic';
     out.prompts = Object.assign({ split: null, survey: null, organize: null, fix: null, chat: null }, (s && s.prompts) || {});
     for (const k of ['notes', 'items', 'tasks', 'words', 'rules', 'memory', 'chats', 'folderFiles', 'folderOriginals', 'runLog']) if (!Array.isArray(out[k])) out[k] = [];
     // 1.1.0: "My rules" become Memory (one list the AI uses everywhere)
@@ -110,8 +117,8 @@
     if (!LIFE.ok || LIFE.blocked || !S) return; // never write when the load failed or another window is in charge
     saveState = 'saving'; paintSaveState();
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(writeState, ART ? 700 : 250); // the artifact database is remote: gather quick changes into one write
-    if (ART || (opts && opts.folder === false)) return; // folder bookkeeping only: no new folder copy
+    saveTimer = setTimeout(writeState, REMOTE ? 700 : 250); // the artifact database is remote: gather quick changes into one write
+    if (REMOTE || (opts && opts.folder === false)) return; // folder bookkeeping only: no new folder copy
     clearTimeout(folderTimer);
     folderTimer = setTimeout(syncFolder, 1500);
   }
@@ -126,8 +133,8 @@
       const ok = await store.putState(S, LIFE.rev);
       if (ok) { LIFE.rev = next; saveState = writeAgain ? 'saving' : 'saved'; } else { saveState = 'error'; blockWindow('changed'); }
     } catch (e) {
-      saveState = 'error'; toast('Could not save: ' + ((e && e.message) || (e && e.code) || e) + '. Mind Desk will try again' + (ART ? ' in a moment.' : ' with your next change.'), 6000);
-      if (ART) { LIFE.retry = Math.min(60000, (LIFE.retry || 2500) * 2); clearTimeout(saveTimer); saveTimer = setTimeout(writeState, LIFE.retry); } // the database can be briefly unavailable
+      saveState = 'error'; toast('Could not save: ' + ((e && e.message) || (e && e.code) || e) + '. Mind Desk will try again' + (REMOTE ? ' in a moment.' : ' with your next change.'), 6000);
+      if (REMOTE) { LIFE.retry = Math.min(60000, (LIFE.retry || 2500) * 2); clearTimeout(saveTimer); saveTimer = setTimeout(writeState, LIFE.retry); } // the database can be briefly unavailable
     } finally { writing = false; }
     if (saveState === 'saved') LIFE.retry = 0;
     paintSaveState();
@@ -233,7 +240,7 @@
    */
   function ask(message, opts = {}) {
     const input = typeof opts.input === 'string';
-    if (!ART) return Promise.resolve(input ? window.prompt(message, opts.input) : window.confirm(message));
+    if (TARGET === 'pc') return Promise.resolve(input ? window.prompt(message, opts.input) : window.confirm(message));
     return new Promise((resolve) => {
       const old = $('#askbox'); if (old && old._done) old._done(input ? null : false);
       const o = document.createElement('div'); o.className = 'overlay askover'; o.id = 'askbox';
@@ -407,10 +414,38 @@
     { id: 'claude-fable-5-1', name: 'Fable 5.1', short: 'Fable', note: 'most capable, if your plan has it' },
   ];
   const TIER_NAME = { quick: 'quick', default: 'main', complex: 'most capable' };
-  const modelName = (id) => (CLAUDE_MODELS.find((m) => m.id === id) || { name: id }).name;
+  const modelName = (id) => (CLAUDE_MODELS.find((m) => m.id === id) || (typeof API_MODELS !== 'undefined' && [...API_MODELS.anthropic, ...API_MODELS.openai].find((m) => m.id === id)) || { name: id }).name;
   /** "claude-opus-5-5" → "Opus 5.5"; "tier:quick" → "Claude (quick model)" */
   const modelLabel = (v) => (String(v).startsWith('tier:') ? `Claude (${TIER_NAME[String(v).slice(5)] || String(v).slice(5)} model)` : modelName(v));
-  const choiceShort = (mode) => { const v = S.settings[mode === 'careful' ? 'claudeCareful' : 'claudeFast']; return v === 'auto' ? (mode === 'careful' ? 'Sonnet' : 'Haiku') : (CLAUDE_MODELS.find((m) => m.id === v) || { short: v }).short; };
+  /** cloud: models for your own API key (one list, shared with the server) */
+  const API_MODELS = /*__API_MODELS__*/{ anthropic: [], openai: [], defaults: { anthropic: ['', ''], openai: ['', ''] } }; // filled in at build from server/lib/models.json (prices: US$ per million tokens)
+  const API_DEFAULT = API_MODELS.defaults;
+  const apiModel = (mode) => { const v = S.settings.apiVendor; const id = S.settings[mode === 'careful' ? 'apiCareful' : 'apiFast']; return API_MODELS[v].find((m) => m.id === id) ? id : API_DEFAULT[v][mode === 'careful' ? 1 : 0]; };
+  const fmtCost = (usd) => (usd < 0.01 ? '<$0.01' : '$' + usd.toFixed(2));
+  const choiceShort = (mode) => {
+    if (S.settings.provider === 'api') { const id = apiModel(mode); return ([...API_MODELS.anthropic, ...API_MODELS.openai].find((m) => m.id === id) || { short: id }).short; }
+    const v = S.settings[mode === 'careful' ? 'claudeCareful' : 'claudeFast']; return v === 'auto' ? (mode === 'careful' ? 'Sonnet' : 'Haiku') : (CLAUDE_MODELS.find((m) => m.id === v) || { short: v }).short;
+  };
+  /** cloud: your API key through the server (which keeps the key, counts the cost and stops at your monthly limit) */
+  const API_STOP = { no_key: 1, limit_reached: 1, bad_key: 1, rate_limited: 1, not_logged_in: 1, no_credit: 1 };
+  async function apiChat(system, user, careful) {
+    const ctrl = new AbortController(); RUN.ctrl = ctrl; RUN.lastCost = 0;
+    try {
+      const r = await PLAT.aiChat(user ? system + '\n\n' + user : system, {
+        careful, signal: ctrl.signal,
+        onText: (text) => { liveUpdate('', text); if (RUN.onText) { try { RUN.onText(text); } catch (e) { /* ignore */ } } },
+      });
+      RUN.lastModel = r.model || null; RUN.lastCost = r.cost || 0; if (r.month != null) UI.monthCost = r.month;
+      if (r.truncated) { const e = new Error('The answer was cut off because it was too long. Fewer or shorter notes at a time will work.'); e.truncated = true; e.claude = true; throw e; }
+      return { content: r.text, thinking: '' };
+    } catch (e) {
+      if (e instanceof Error) { if (e.name === 'AbortError') throw abortErr(); throw e; }
+      if (e && e.code === 'cancelled') throw abortErr();
+      const err = new Error((e && e.message) || 'The AI service did not answer.'); err.code = e && e.code; err.claude = true;
+      if (API_STOP[err.code]) err.conn = true; // stop the run, never retry
+      throw err;
+    } finally { if (RUN.ctrl === ctrl) RUN.ctrl = null; }
+  }
   function claudeErr(e) {
     const code = (e && e.code) || 'upstream_error';
     if (code === 'cancelled') return abortErr();
@@ -452,9 +487,9 @@
   /** one AI request that must return JSON; tries twice. Returns {data, thinking, ms, cut} and writes a line to the run log */
   async function aiJSON(step, system, user, noteName) {
     let last; let thinking = ''; let cut = false; const t0 = Date.now();
-    let think = S.settings.provider === 'claude' ? RUN.mode === 'careful' : thinks(step);
+    let think = bigAI() ? RUN.mode === 'careful' : thinks(step);
     const log = (ok, err) => {
-      S.runLog.push({ at: Date.now(), step, note: noteName || '', mode: think || cut ? 'careful' : 'fast', ms: Date.now() - t0, ok, err: err || '', cut, thinkChars: thinking.length, ...(S.settings.provider === 'claude' && RUN.lastModel ? { model: modelLabel(RUN.lastModel) } : {}) });
+      S.runLog.push({ at: Date.now(), step, note: noteName || '', mode: think || cut ? 'careful' : 'fast', ms: Date.now() - t0, ok, err: err || '', cut, thinkChars: thinking.length, ...(bigAI() && RUN.lastModel ? { model: modelLabel(RUN.lastModel) } : {}), ...(RUN.lastCost ? { cost: RUN.lastCost } : {}) });
       if (S.runLog.length > 300) S.runLog.splice(0, S.runLog.length - 300);
     };
     liveStart(step);
@@ -464,6 +499,7 @@
         let r;
         try {
           r = S.settings.provider === 'claude' ? await claudeChat(system, user, RUN.mode === 'careful')
+            : S.settings.provider === 'api' ? await apiChat(system, user, RUN.mode === 'careful')
             : S.settings.provider === 'openai' ? await openaiChat(system, user) : await ollamaChat(system, user, C.SCHEMAS[step], step === 'organize' || step === 'fix' ? 1 : 0.2, think);
         } catch (e) {
           if (!e.thinkTooLong) throw e;
@@ -505,10 +541,10 @@
   }
 
   /** steps that send many notes in one request: copy & paste mode, and Claude in the artifact */
-  const batched = () => S.settings.provider === 'manual' || S.settings.provider === 'claude';
+  const batched = () => S.settings.provider === 'manual' || bigAI();
   /** one batched request: copy & paste shows the prompt; Claude answers it directly */
   async function askBatch(step, title, text, name) {
-    if (S.settings.provider !== 'claude') return askManual(title, text);
+    if (!bigAI()) return askManual(title, text);
     return (await aiJSON(step, text, '', name || title)).data;
   }
   /** cut a list into groups of at most maxN entries and about maxChars characters */
@@ -575,7 +611,7 @@
       if (blocks.length <= 1) addItemsFromGroups(n, blocks, blocks.length ? [[0]] : []); else payload.push({ id: n.id, note: n, blocks });
     }
     if (!payload.length) return;
-    const claude = S.settings.provider === 'claude';
+    const claude = bigAI();
     // copy & paste: one prompt for everything; Claude: parts of about 30,000 characters
     const parts = claude ? groupBy(payload, (p) => p.note.text.length, 1e9, CLAUDE_LIMIT.split) : [payload];
     for (let k = 0; k < parts.length; k++) {
@@ -628,7 +664,7 @@
 
   function applyResult(it, chk, thinking, ms, cut) {
     if (!alive(it)) return; // deleted or replaced meanwhile: drop the answer
-    it.thinking = thinking ? String(thinking).slice(0, 20000) : undefined; it.mode = RUN.mode || 'fast'; it.ms = ms || undefined; it.model = S.settings.provider === 'claude' && RUN.lastModel ? RUN.lastModel : undefined;
+    it.thinking = thinking ? String(thinking).slice(0, 20000) : undefined; it.mode = RUN.mode || 'fast'; it.ms = ms || undefined; it.model = bigAI() && RUN.lastModel ? RUN.lastModel : undefined;
     if (cut) chk.flags.push('thinkcut');
     it.tags = Array.isArray(it.tags) ? it.tags : []; // one place rule: the AI no longer adds "also show in"; your own choices stay
     it.title = chk.title; it.cat = chk.category; it.text = chk.text; it.flags = chk.flags; it.lost = chk.lost; it.error = '';
@@ -750,7 +786,7 @@
         }
       } else unsurveyed.forEach((i) => { i.surveyed = true; });
       const todo = S.items.filter((i) => i.status === 'pending' && mineItem(i));
-      if (S.settings.provider === 'claude') await organizeClaude(todo);
+      if (bigAI()) await organizeClaude(todo);
       else if (manual) { setProgress('Organizing', 0, 0); await organizeManual(todo); } else {
         for (let i = 0; i < todo.length; i++) {
           if (RUN.stop) throw abortErr();
@@ -772,7 +808,7 @@
 
   /* ================= folder sync ================= */
   async function initFolder() {
-    if (ART || !('showDirectoryPicker' in window) || !store.db) return;
+    if (TARGET !== 'pc' || !('showDirectoryPicker' in window) || !store.db) return;
     try {
       const h = await store.get('folder'); if (!h) return;
       FOLDER.handle = h; FOLDER.name = h.name;
@@ -900,7 +936,7 @@
       ${searchable ? `<input type="search" id="search" placeholder="Search…" value="${esc(UI.search)}" aria-label="Search">` : ''}
       <div class="grow"></div><div class="progress" id="progress"></div>
       ${S.settings.provider === 'manual' ? '' : `<select id="modeSel" data-set="mode" aria-label="Fast or careful" ${RUN.active ? 'disabled' : ''} title="Fast: quick answers. Careful: the AI thinks first (slower, better at understanding what you meant).">
-        <option value="fast"${S.settings.mode === 'fast' ? ' selected' : ''}>⚡ Fast${ART ? ' · ' + esc(choiceShort('fast')) : ''}</option><option value="careful"${S.settings.mode === 'careful' ? ' selected' : ''}>🧠 Careful${ART ? ' · ' + esc(choiceShort('careful')) : ''}</option></select>`}
+        <option value="fast"${S.settings.mode === 'fast' ? ' selected' : ''}>⚡ Fast${bigAI() ? ' · ' + esc(choiceShort('fast')) : ''}</option><option value="careful"${S.settings.mode === 'careful' ? ' selected' : ''}>🧠 Careful${bigAI() ? ' · ' + esc(choiceShort('careful')) : ''}</option></select>`}
       <button class="btn primary" data-act="organizeAll" ${RUN.active ? 'disabled' : ''} title="Split, ask questions and organize all new notes">✨ Organize all${pendingWork ? ` (${pendingWork})` : ''}</button>`;
     if (RUN.active) setProgress(RUN.label, RUN.done, RUN.total);
   }
@@ -1146,7 +1182,7 @@
     return `<div class="pane list chatlist"><div class="tools"><button class="btn" data-act="newChat">＋ New chat</button></div>${list || '<p class="muted small" style="padding:12px">Your chats are saved here.</p>'}</div>
       <div class="chatmain"><div class="msgs" id="msgs">${msgs}</div>
       <div class="composer"><textarea id="chatIn" rows="2" placeholder="Ask about your notes, or tell Mind Desk what to change… (Enter = send, Shift+Enter = new line)">${esc(UI.chatDraft || '')}</textarea><button class="btn primary" data-act="sendChat" ${RUN.active ? 'disabled' : ''}>Send</button></div>
-      <div class="muted small" style="padding:0 16px 10px">${S.settings.provider === 'manual' ? 'Copy & paste mode: your message goes to ChatGPT or Claude.' : (S.settings.mode === 'careful' ? '🧠 Careful: the AI thinks first (slower).' : '⚡ Fast answers.') + ' Change it at the top.'} Memory: ${S.memory.length} item(s).${ART ? ` <label class="small" style="margin-left:8px" title="On: Claude reads all your notes with every message (organized or not). Off: only the notes that match your message (uses less of your plan)."><input type="checkbox" id="set-chatAll" data-set="chatAll" ${S.settings.chatAll !== false ? 'checked' : ''}> Read all my notes (${S.notes.length})</label>` : ''}</div></div>`;
+      <div class="muted small" style="padding:0 16px 10px">${S.settings.provider === 'manual' ? 'Copy & paste mode: your message goes to ChatGPT or Claude.' : (S.settings.mode === 'careful' ? '🧠 Careful: the AI thinks first (slower).' : '⚡ Fast answers.') + ' Change it at the top.'} Memory: ${S.memory.length} item(s).${bigAI() ? ` <label class="small" style="margin-left:8px" title="On: Claude reads all your notes with every message (organized or not). Off: only the notes that match your message (uses less of your plan)."><input type="checkbox" id="set-chatAll" data-set="chatAll" ${S.settings.chatAll !== false ? 'checked' : ''}> Read all my notes (${S.notes.length})</label>` : ''}</div></div>`;
   }
   function scrollChat() { const m = $('#msgs'); if (m) m.scrollTop = m.scrollHeight; }
   function findAction(el) {
@@ -1165,8 +1201,11 @@
     const radio = (v, label) => `<label style="display:block;margin-bottom:4px"><input type="radio" name="prov" data-set="provider" value="${v}" ${p === v ? 'checked' : ''}> ${label}</label>`;
     let ai = ART ? `<div class="box"><h2>AI: Claude</h2>
       <p class="hint">Mind Desk asks Claude with your own Claude plan, so there is nothing to set up and no extra cost beyond your plan’s usage. The first time, Claude asks you to allow it. Your notes go to Claude only when you press a button (Organize, Ask AI again, Fix my typing, Chat).</p>
-      <div class="row"><button class="btn" data-act="testAI">Try a quick test note</button></div><div id="connResult" style="margin-top:10px">${UI.connResult}</div></div>` : `<div class="box"><h2>AI connection</h2>${radio('ollama', '<b>Ollama</b> on this PC (private and free) — recommended')}${radio('manual', '<b>Copy &amp; paste</b> with ChatGPT or Claude (no setup; your notes leave your PC)')}${radio('openai', '<b>Other local AI</b> with an OpenAI-style API (AnythingLLM, LM Studio…)')}<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">`;
-    if (ART) { /* Claude only */ } else if (p === 'ollama') {
+      <div class="row"><button class="btn" data-act="testAI">Try a quick test note</button></div><div id="connResult" style="margin-top:10px">${UI.connResult}</div></div>` : `<div class="box"><h2>AI connection</h2>${CLOUD ? radio('api', '<b>Claude or ChatGPT with your own API key</b> (paid per use, with a monthly limit; works on every device)') : ''}${radio('ollama', '<b>Ollama</b> on this PC (private and free) — recommended')}${radio('manual', '<b>Copy &amp; paste</b> with ChatGPT or Claude (no setup; your notes leave your PC)')}${radio('openai', '<b>Other local AI</b> with an OpenAI-style API (AnythingLLM, LM Studio…)')}<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">`;
+    if (ART) { /* Claude only */ } else if (p === 'api') {
+      ai += apiBoxHtml();
+    } else if (p === 'ollama') {
+      if (CLOUD) ai += '<p class="hint">Ollama answers only when you open Mind Desk on the PC where Ollama runs. Set <code>OLLAMA_ORIGINS</code> to this site’s address (for example <code>https://mind.yourdomain.com</code>) instead of <code>*</code>.</p>';
       ai += `<div class="grid2">${sField('ollamaUrl', 'Ollama address')}<div class="field"><label for="set-model">Model</label><input type="text" id="set-model" data-set="model" value="${esc(s.model)}" list="modelList"><datalist id="modelList"></datalist></div></div>
         <div class="row"><button class="btn" data-act="testConn">Test connection</button><button class="btn" data-act="testAI">Try a quick test note</button></div>
         <div id="connResult" style="margin-top:10px">${UI.connResult}</div>
@@ -1179,7 +1218,7 @@
     } else {
       ai += `<p class="hint">Mind Desk shows you a prompt to copy into ChatGPT or Claude, and you paste the answer back. Three short rounds: split, questions, organize.</p>${sField('manualBatch', 'Notes per prompt in the organize step', 'number', 'min="1" max="100"')}`;
     }
-    const warns = ART ? [] : remoteWarning();
+    const warns = ART || p === 'api' ? [] : remoteWarning();
     if (warns.length) ai += warns.map((w) => `<div class="banner${/Copy & paste/.test(w) ? ' info' : ' bad'}" style="margin-top:12px">${esc(w)}</div>`).join('');
     if (!ART) ai += '</div>';
     const mOpt = (key) => `<option value="auto"${s[key] === 'auto' ? ' selected' : ''}>Automatic (${key === 'claudeFast' ? 'quick model, usually Haiku' : 'main model, usually Sonnet'})</option>` + CLAUDE_MODELS.map((m) => `<option value="${m.id}"${s[key] === m.id ? ' selected' : ''}>${esc(m.name)} — ${esc(m.note)}</option>`).join('');
@@ -1190,7 +1229,7 @@
       <div class="field" style="max-width:420px"><label for="set-claudeEffort">How hard Careful thinks (with a chosen model)</label><select id="set-claudeEffort" data-set="claudeEffort">
         ${[['auto', 'Normal'], ['low', 'Low (faster)'], ['medium', 'Medium'], ['high', 'High (slowest, most thorough)']].map(([v, l]) => `<option value="${v}"${s.claudeEffort === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div>
       <p class="muted small">A chosen model in ⚡ Fast thinks only a little, to stay quick. Claude’s thinking is not shown here.</p></div>`
-      : s.provider === 'manual' ? '' : `<div class="box"><h2>Fast or Careful</h2>
+      : s.provider === 'manual' || s.provider === 'api' ? '' : `<div class="box"><h2>Fast or Careful</h2>
       <p class="hint">Choose next to <b>✨ Organize all</b> each time. <b>⚡ Fast</b>: quick answers, no thinking. <b>🧠 Careful</b>: the AI thinks first. Slower (often 2–3 times), but better at understanding what you meant. The thinking is saved and folded away under <b>Show AI’s thinking</b>.</p>
       <p style="margin:8px 0 4px">In Careful mode, let the AI think in:</p>
       <div class="row">${sField('thinkSplit', 'Step 1: splitting notes', 'checkbox')}${sField('thinkSurvey', 'Step 2: questions', 'checkbox')}${sField('thinkOrganize', 'Step 3: organizing (typos, category, tasks)', 'checkbox')}</div>
@@ -1204,7 +1243,52 @@
     const survey = `<div class="box"><h2>Questions before organizing</h2>${sField('survey', 'Let the AI ask me about words and notes it does not understand', 'checkbox')}<div style="max-width:220px;margin-top:8px">${sField('surveyMax', 'Maximum questions per run', 'number', 'min="1" max="20"')}</div></div>`;
     return ai + mode + writing + survey + reportBox() + catEditor() + promptEditor() + storageBox() + (ART ? '' : `<div class="box"><h2>Look</h2><div class="field" style="max-width:220px"><label for="set-theme">Theme</label>
       <select id="set-theme" data-set="theme"><option value="auto"${s.theme === 'auto' ? ' selected' : ''}>Same as Windows</option><option value="light"${s.theme === 'light' ? ' selected' : ''}>Light</option><option value="dark"${s.theme === 'dark' ? ' selected' : ''}>Dark</option></select></div></div>`) + `
-      <div class="box"><h2>Danger zone</h2><button class="btn danger" data-act="deleteAll">Delete everything in Mind Desk</button><p class="muted small">Mind Desk ${esc(VERSION)}${ART ? ' (Claude artifact)' : ''}</p></div>`;
+      <div class="box"><h2>Danger zone</h2><button class="btn danger" data-act="deleteAll">Delete everything in Mind Desk</button><p class="muted small">Mind Desk ${esc(VERSION)}${ART ? ' (Claude artifact)' : CLOUD ? ' (cloud)' : ''}</p></div>`;
+  }
+  /** cloud: your API key, the models for Fast and Careful, and the monthly limit (key and spending live on the server) */
+  function apiBoxHtml() {
+    const s = S.settings; const list = API_MODELS[s.apiVendor] || [];
+    const price = (m) => `$${m.price[0]} in / $${m.price[1]} out per million tokens`;
+    const opts = (mode) => list.map((m) => `<option value="${esc(m.id)}"${apiModel(mode) === m.id ? ' selected' : ''}>${esc(m.name)} — ${esc(m.note)}</option>`).join('');
+    const cur = (mode) => list.find((m) => m.id === apiModel(mode));
+    return `<div class="grid2"><div class="field"><label for="set-apiVendor">Service</label><select id="set-apiVendor" data-set="apiVendor">
+        <option value="anthropic"${s.apiVendor === 'anthropic' ? ' selected' : ''}>Claude (Anthropic API)</option><option value="openai"${s.apiVendor === 'openai' ? ' selected' : ''}>ChatGPT (OpenAI API)</option></select></div></div>
+      <div class="grid2"><div class="field"><label for="set-apiFast">⚡ Fast uses</label><select id="set-apiFast" data-set="apiFast">${opts('fast')}</select><span class="muted small">${esc(price(cur('fast')))}</span></div>
+        <div class="field"><label for="set-apiCareful">🧠 Careful uses</label><select id="set-apiCareful" data-set="apiCareful">${opts('careful')}</select><span class="muted small">${esc(price(cur('careful')))}</span></div></div>
+      <div id="apiServer" class="acard" style="margin:4px 0 12px">Loading your key and spending…</div>
+      <div class="row"><button class="btn" data-act="testAI">Try a quick test note</button></div><div id="connResult" style="margin-top:10px">${UI.connResult}</div>
+      <p class="muted small">Your notes go to ${s.apiVendor === 'openai' ? 'OpenAI' : 'Anthropic'} only when you press a button. The key is kept on your server: it never comes back to the browser and is never in a backup. This is paid per use, separate from a ChatGPT or Claude subscription. Prices checked 22 Oct 2026.</p>`;
+  }
+  async function loadApiBox() {
+    const el = $('#apiServer'); if (!el || !CLOUD) return;
+    let a; try { a = await PLAT.aiSettings(); } catch (e) { el.innerHTML = `<span style="color:var(--bad)">${esc(e.message)}</span>`; return; }
+    UI.monthCost = a.month.usd;
+    const v = S.settings.apiVendor; const k = a.keys[v] || {};
+    const el2 = $('#apiServer'); if (!el2) return;
+    el2.innerHTML = `<div class="field"><label for="apiKeyIn">${v === 'openai' ? 'OpenAI' : 'Anthropic'} API key</label>
+        ${k.set ? `<div class="row"><span class="chip good">saved (…${esc(k.last4)})</span><button class="btn small" data-act="removeApiKey" data-v="${esc(v)}">Remove</button></div>` : ''}
+        <div class="row"><input type="password" id="apiKeyIn" autocomplete="off" placeholder="${k.set ? 'Paste a new key to replace it' : 'Paste your key (starts with ' + (v === 'openai' ? 'sk-' : 'sk-ant-') + ')'}" style="flex:1;min-width:220px"><button class="btn small primary" data-act="saveApiKey" data-v="${esc(v)}">Save key</button></div></div>
+      <div class="row"><span>This month: <b>${esc(fmtCost(a.month.usd))}</b> of <b>$${esc(String(a.limitUsd))}</b> (${a.month.requests} request${a.month.requests === 1 ? '' : 's'})</span></div>
+      <div class="row" style="margin-top:6px"><label for="apiLimitIn">Monthly limit (US$)</label><input type="number" id="apiLimitIn" min="0" step="1" value="${esc(String(a.limitUsd))}" style="width:90px"><button class="btn small" data-act="saveApiLimit">Save limit</button><span class="muted small">Mind Desk stops when the month reaches it.</span></div>`;
+  }
+  /** cloud: send everything to the Claude artifact and merge the organized result back */
+  function roundTripBox() {
+    const st = S.sentToClaude;
+    return `<div class="box"><h2>Organize free with Claude (round trip)</h2>
+      <p class="hint">Uses your Claude plan instead of an API key. Your notes stay here; the artifact only works on a copy.</p>
+      <ol class="steps"><li><b>📤 Send to Claude</b> downloads a file with all your notes, Memory, words and categories.</li>
+        <li>Open the <b>Mind Desk artifact</b> on claude.ai → Settings → <b>Restore from backup…</b> → choose that file → <b>✨ Organize all</b> (and chat, review, as you like).</li>
+        <li>In the artifact: Settings → <b>Download backup</b>.</li>
+        <li>Here: <b>📥 Bring back from Claude</b> → choose that file. Ideas you captured here in the meantime are kept.</li></ol>
+      ${st ? `<p class="muted small">Last sent: ${esc(fmtTime(st.at))}.</p>` : ''}
+      <div class="row"><button class="btn primary" data-act="sendToClaude">📤 Send to Claude</button><button class="btn" data-act="bringBack">📥 Bring back from Claude</button></div></div>`;
+  }
+  function accountBox() {
+    const a = (PLAT && PLAT.account) || {};
+    return `<div class="box"><h2>Login</h2><p class="hint">Logged in${a.user ? ' as <b>' + esc(a.user) + '</b>' : ''}. Two-step code: ${a.totp ? '<span class="chip good">on</span>' : '<span class="chip warn">off</span>'}${a.recoveryLeft != null ? ` · ${a.recoveryLeft} recovery code(s) left` : ''}.</p>
+      <div class="grid2"><div class="field"><label for="pwOld">Current password</label><input type="password" id="pwOld" autocomplete="current-password"></div>
+        <div class="field"><label for="pwNew">New password (12 characters or more)</label><input type="password" id="pwNew" autocomplete="new-password"></div></div>
+      <div class="row"><button class="btn" data-act="changePassword">Change password</button><button class="btn" data-act="logout">Log out</button></div></div>`;
   }
   function ollamaHelp() {
     return `<ol class="steps">
@@ -1249,6 +1333,10 @@
       <div class="row"><button class="btn" data-act="report" data-scope="review">Report: items waiting for review</button><button class="btn" data-act="report" data-scope="all">Report: all notes</button></div></div>`;
   }
   function storageBox() {
+    if (CLOUD) {
+      return roundTripBox() + `<div class="box"><h2>Saving &amp; backup</h2><p class="hint">Everything is saved on your server as you work, and opened from any device after you log in. The server also keeps a copy every day (the last 30 days) and one before every “Bring back” and every restore.</p>
+        <div class="row"><button class="btn" data-act="exportJSON">Download backup</button><button class="btn" data-act="importJSON">Restore from backup…</button><button class="btn" data-act="downloadMD">Download all as Markdown</button></div></div>` + accountBox();
+    }
     if (ART) {
       const where = PLAT.mode === 'db' ? 'Everything is saved automatically in this artifact’s private storage on your Claude account. Only you can see it, also if you share the artifact. Open the same artifact on your phone or another computer to see the same notes.'
         : PLAT.mode === 'local' ? `<span style="color:var(--warn)">Your notes are saved only in this browser (${esc(PLAT.reason)}). Open Mind Desk on claude.ai, signed in, to keep them in your account.</span>`
@@ -1462,7 +1550,7 @@
       save(); render(); setProgress(RUN.mode === 'careful' ? 'Thinking about your message' : 'Answering', 0, 0);
       const out = { id: C.uid('a'), role: 'assistant', text: '', at: 0 };
       try {
-        const p = C.buildChatPrompt(prompt('chat'), S, history, text, Object.assign(ctx(), ART && S.settings.chatAll !== false ? { allNotes: { maxBytes: 150000 } } : {}));
+        const p = C.buildChatPrompt(prompt('chat'), S, history, text, Object.assign(ctx(), bigAI() && S.settings.chatAll !== false ? { allNotes: { maxBytes: 150000 } } : {}));
         let data; let thinking = '';
         if (S.settings.provider === 'manual') data = await askManual('Chat: your message for ChatGPT or Claude', p.system + '\n\n' + p.user);
         else {
@@ -1474,7 +1562,7 @@
         const acts = C.checkChatActions(data.actions, S, p.ids);
         out.text = String(data.reply || '').trim() || (acts.actions.length ? 'Here is what I suggest:' : '(no answer)');
         if (thinking) out.thinking = thinking.slice(0, 20000);
-        if (S.settings.provider === 'claude' && RUN.lastModel) out.model = RUN.lastModel;
+        if (bigAI() && RUN.lastModel) out.model = RUN.lastModel;
         out.actions = acts.actions.map((a) => Object.assign({ id: C.uid('x'), status: a.type === 'show_note' ? 'shown' : 'pending' }, a));
         out.remember = C.checkRemember(data.remember, S.memory).map((t) => ({ id: C.uid('r'), text: t, status: 'pending' }));
         if (acts.dropped) out.dropped = acts.dropped;
@@ -1565,7 +1653,7 @@
       RUN.active = true; RUN.stop = false; RUN.mode = S.settings.mode;
       try {
         const a = await aiJSON('organize', p.system, p.user, 'test note'); const chk = C.checkOrganize(a.data, sample, c);
-        setConn(`<div class="banner info">✓ The AI answered in ${((Date.now() - t0) / 1000).toFixed(1)} s (${RUN.mode === 'careful' ? 'Careful' : 'Fast'} mode${S.settings.provider === 'claude' && RUN.lastModel ? ', ' + esc(modelLabel(RUN.lastModel)) : ''}).<br><b>Before:</b> ${esc(sample)}<br><b>After:</b> ${esc(chk.text)}<br><b>Category:</b> ${esc(C.catPath(cats(), chk.category))}${chk.tasks.length ? '<br><b>Tasks:</b> ' + esc(chk.tasks.map((x) => x.text).join(' · ')) : ''}</div>${thinkBox(a.thinking)}`);
+        setConn(`<div class="banner info">✓ The AI answered in ${((Date.now() - t0) / 1000).toFixed(1)} s (${RUN.mode === 'careful' ? 'Careful' : 'Fast'} mode${bigAI() && RUN.lastModel ? ', ' + esc(modelLabel(RUN.lastModel)) : ''}${RUN.lastCost ? ' · ' + esc(fmtCost(RUN.lastCost)) : ''}).<br><b>Before:</b> ${esc(sample)}<br><b>After:</b> ${esc(chk.text)}<br><b>Category:</b> ${esc(C.catPath(cats(), chk.category))}${chk.tasks.length ? '<br><b>Tasks:</b> ' + esc(chk.tasks.map((x) => x.text).join(' · ')) : ''}</div>${thinkBox(a.thinking)}`);
       } catch (e) { setConn(`<div class="banner bad">${esc(e.message)}</div>${e.conn ? connHelpHtml() : ''}`); } finally { RUN.active = false; }
     },
     addCat() {
@@ -1747,11 +1835,11 @@
     }
     RUN.stop = true; if (RUN.ctrl) RUN.ctrl.abort(); if (RUN.manualReject) RUN.manualReject(); if (RUN.surveyWait) RUN.surveyWait.reject(abortErr());
     const text = reason === 'changed'
-      ? (ART ? 'Your notes were changed in Mind Desk on another device or in another tab. To avoid overwriting them, this page stopped saving. Load the newest version to carry on here.' : 'Your notes were changed in another Mind Desk window. To avoid overwriting them, this window stopped saving.')
+      ? (REMOTE ? 'Your notes were changed in Mind Desk on another device or in another tab. To avoid overwriting them, this page stopped saving. Load the newest version to carry on here.' : 'Your notes were changed in another Mind Desk window. To avoid overwriting them, this window stopped saving.')
       : 'Mind Desk is open in another window or tab. Only one window can work at a time, so nothing gets overwritten.';
     const o = screen(`<h2>Mind Desk is open somewhere else</h2><p>${text}</p>
       ${unsaved ? '<p class="banner">This window had changes that were not saved yet. A copy was kept: the other window offers it, or download it here.</p>' : ''}
-      <div class="actions"><button class="btn primary" id="takeOver">${ART && reason === 'changed' ? 'Load the newest version' : 'Use Mind Desk here'}</button>${S ? '<button class="btn" id="dlCopy">Download this window’s copy</button>' : ''}</div>
+      <div class="actions"><button class="btn primary" id="takeOver">${REMOTE && reason === 'changed' ? 'Load the newest version' : 'Use Mind Desk here'}</button>${S ? '<button class="btn" id="dlCopy">Download this window’s copy</button>' : ''}</div>
       <p class="muted small">The other window will then stop and show this message.</p>`, 'data-blocked');
     $('#takeOver', o).onclick = takeOver;
     if ($('#dlCopy', o)) $('#dlCopy', o).onclick = () => download(`mind-desk-window-copy-${today()}.json`, JSON.stringify(exportObj(), null, 1), 'application/json');
@@ -1804,7 +1892,7 @@
   let wired = false;
   async function start() {
     window.MD = { get state() { return S; }, ACT, organizeAll, render, save, store, RUN, UI, FOLDER, LIFE, syncFolder, VERSION, TARGET, ask };
-    if (ART) {
+    if (PLAT) {
       await PLAT.init(); // asks claude.ai for storage, Claude and downloads (each may be missing)
       // another device or tab saved newer notes: stop saving here (the same protection as two windows on the PC)
       PLAT.onRemoteChange = () => { if (LIFE.ok && !LIFE.blocked) blockWindow('changed'); };

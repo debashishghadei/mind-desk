@@ -717,6 +717,69 @@ Answer only with JSON: {"reply":"","actions":[],"remember":[]}`,
     user += 'Person: ' + message;
     return { system, user, ids: c.ids };
   }
+  /* ---------- round trip with the Claude artifact (cloud build): send everything, organize there, merge back ---------- */
+  const RT_LISTS = ['notes', 'items', 'tasks', 'chats', 'memory', 'words', 'categories'];
+  function hash(o) { const str = JSON.stringify(o); let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36) + '.' + str.length.toString(36); }
+  /** fingerprints of everything at the moment of sending, to know later what changed on which side */
+  function roundTripBase(state) {
+    const base = {};
+    for (const k of RT_LISTS) { base[k] = {}; for (const x of state[k] || []) if (x && x.id != null) base[k][x.id] = hash(x); }
+    base.prompts = {}; for (const k of Object.keys(state.prompts || {})) base.prompts[k] = hash(state.prompts[k]);
+    base.survey = hash(state.survey || null);
+    return base;
+  }
+  const stamp = (x) => Math.max(+x.updatedAt || 0, +x.at || 0, +x.doneAt || 0, +x.addedAt || 0, +x.createdAt || 0);
+  /**
+   * Three-way merge: local = this app now, incoming = the file from the artifact, base = fingerprints at sending (null: not sent from here).
+   * Changed on one side only → that side wins. Changed on both → the newer one (incoming when unknown). New on either side → kept.
+   * Deleted on one side and unchanged on the other → deleted. Settings stay local.
+   */
+  function mergeRoundTrip(local, incoming, base) {
+    const out = JSON.parse(JSON.stringify(local)); const sum = { added: {}, updated: {}, removed: {}, keptHere: {}, conflicts: 0 };
+    const inc = (o, k) => { o[k] = (o[k] || 0) + 1; };
+    for (const k of RT_LISTS) {
+      const L = new Map((local[k] || []).filter((x) => x && x.id != null).map((x) => [x.id, x]));
+      const I = new Map((incoming[k] || []).filter((x) => x && x.id != null).map((x) => [x.id, x]));
+      const B = (base && base[k]) || {};
+      const res = [];
+      for (const [id, x] of I) {
+        const l = L.get(id); const inBase = id in B;
+        if (l) {
+          const lc = !inBase || hash(l) !== B[id]; const ic = !inBase || hash(x) !== B[id];
+          if (!ic) res.push(l);
+          else if (!lc) { res.push(x); if (hash(l) !== hash(x)) inc(sum.updated, k); }
+          else if (hash(l) === hash(x)) res.push(l);
+          else { sum.conflicts++; const pick = stamp(l) > stamp(x) ? l : x; res.push(pick); if (pick === x) inc(sum.updated, k); }
+        } else if (inBase) { // deleted here after sending
+          if (hash(x) !== B[id]) sum.conflicts++; // changed there, deleted here: stays deleted
+        } else { res.push(x); inc(sum.added, k); } // new from the artifact
+      }
+      for (const [id, l] of L) {
+        if (I.has(id)) continue;
+        if (id in B) { if (hash(l) !== B[id]) { res.push(l); sum.conflicts++; } else inc(sum.removed, k); } // removed there
+        else { res.push(l); inc(sum.keptHere, k); } // new here since sending
+      }
+      out[k] = res.map((x) => JSON.parse(JSON.stringify(x)));
+    }
+    out.prompts = Object.assign({}, local.prompts || {});
+    for (const k of Object.keys(Object.assign({}, local.prompts, incoming.prompts))) {
+      const l = (local.prompts || {})[k] ?? null; const x = (incoming.prompts || {})[k] ?? null; const b = base && base.prompts ? base.prompts[k] : undefined;
+      if (hash(x) !== b && (b === undefined ? true : hash(l) === b)) out.prompts[k] = x;
+    }
+    if (base && hash(local.survey || null) === base.survey) out.survey = incoming.survey || null;
+    // keep the pieces consistent
+    const noteIds = new Set(out.notes.map((n) => n.id));
+    out.items = out.items.filter((i) => noteIds.has(i.noteId));
+    const itemIds = new Set(out.items.map((i) => i.id));
+    out.tasks = out.tasks.filter((t) => !t.itemId || itemIds.has(t.itemId));
+    const catIds = new Set(out.categories.map((c) => c.id));
+    for (const sys of defaultCategories().filter((c) => c.system)) if (!catIds.has(sys.id)) { out.categories.push(sys); catIds.add(sys.id); }
+    out.categories.forEach((c) => { if (c.parent && !catIds.has(c.parent)) c.parent = null; if (c.area && !catIds.has(c.area)) c.area = null; });
+    out.items.forEach((i) => { if (!catIds.has(i.cat)) i.cat = 'unsorted'; i.tags = (i.tags || []).filter((t) => catIds.has(t)); });
+    out.tasks.forEach((t) => { if (!catIds.has(t.cat)) t.cat = 'todo'; });
+    out.schema = Math.max(+local.schema || 1, +incoming.schema || 1);
+    return { state: out, summary: sum };
+  }
   /** keep only actions that point to things that exist; returns {actions, dropped} */
   /** the "reply" text from a JSON answer that is still being written (for the live chat bubble) */
   function partialReply(raw) {
@@ -872,7 +935,7 @@ Answer only with JSON: {"reply":"","actions":[],"remember":[]}`,
     partialReply, buildOrganizePrompt, bulkSplitPrompt, bulkOrganizePrompt, bulkSurveyPrompt, diff, changeRatio, countTerm, checkOrganize,
     checkSurvey, fmtDate, safeName, categoryMarkdown, allMarkdown, visibleTasks, validBackup, backupProblem, itemsIn, linkedTasks,
     editDistance, splitOriginal, taskSupport, taskDone, charChange, wordMatch, EDIT_RULES, buildFixPrompt, buildReport, nameCandidates, hideNames,
-    buildChatContext, buildAllNotesContext, noteNamed, buildChatPrompt, checkChatActions, checkRemember,
+    buildChatContext, buildAllNotesContext, noteNamed, buildChatPrompt, roundTripBase, mergeRoundTrip, checkChatActions, checkRemember,
   };
 })();
 if (typeof window !== 'undefined') window.MDCore = MDCore;

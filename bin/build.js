@@ -10,7 +10,9 @@ const { execFileSync } = require('child_process');
 const root = path.join(__dirname, '..');
 const version = fs.readFileSync(path.join(root, 'VERSION'), 'utf8').trim();
 const read = (f) => fs.readFileSync(path.join(root, 'src', f), 'utf8');
-const app = (target) => read('app.js').replace("'__VERSION__'", JSON.stringify(version)).replace("'__TARGET__'", JSON.stringify(target));
+const MODELS = fs.readFileSync(path.join(root, 'server', 'lib', 'models.json'), 'utf8');
+const app = (target) => read('app.js').replace("'__VERSION__'", JSON.stringify(version)).replace("'__TARGET__'", JSON.stringify(target))
+  .replace(/\/\*__API_MODELS__\*\/.*?; \/\/ filled/, () => JSON.stringify(JSON.parse(MODELS)) + '; // filled');
 
 /* PC: the full page */
 let html = read('index.html');

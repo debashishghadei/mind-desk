@@ -943,6 +943,69 @@ Answer only with JSON: {"reply":"","actions":[],"remember":[]}`,
     user += 'Person: ' + message;
     return { system, user, ids: c.ids };
   }
+  /* ---------- round trip with the Claude artifact (cloud build): send everything, organize there, merge back ---------- */
+  const RT_LISTS = ['notes', 'items', 'tasks', 'chats', 'memory', 'words', 'categories'];
+  function hash(o) { const str = JSON.stringify(o); let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(36) + '.' + str.length.toString(36); }
+  /** fingerprints of everything at the moment of sending, to know later what changed on which side */
+  function roundTripBase(state) {
+    const base = {};
+    for (const k of RT_LISTS) { base[k] = {}; for (const x of state[k] || []) if (x && x.id != null) base[k][x.id] = hash(x); }
+    base.prompts = {}; for (const k of Object.keys(state.prompts || {})) base.prompts[k] = hash(state.prompts[k]);
+    base.survey = hash(state.survey || null);
+    return base;
+  }
+  const stamp = (x) => Math.max(+x.updatedAt || 0, +x.at || 0, +x.doneAt || 0, +x.addedAt || 0, +x.createdAt || 0);
+  /**
+   * Three-way merge: local = this app now, incoming = the file from the artifact, base = fingerprints at sending (null: not sent from here).
+   * Changed on one side only → that side wins. Changed on both → the newer one (incoming when unknown). New on either side → kept.
+   * Deleted on one side and unchanged on the other → deleted. Settings stay local.
+   */
+  function mergeRoundTrip(local, incoming, base) {
+    const out = JSON.parse(JSON.stringify(local)); const sum = { added: {}, updated: {}, removed: {}, keptHere: {}, conflicts: 0 };
+    const inc = (o, k) => { o[k] = (o[k] || 0) + 1; };
+    for (const k of RT_LISTS) {
+      const L = new Map((local[k] || []).filter((x) => x && x.id != null).map((x) => [x.id, x]));
+      const I = new Map((incoming[k] || []).filter((x) => x && x.id != null).map((x) => [x.id, x]));
+      const B = (base && base[k]) || {};
+      const res = [];
+      for (const [id, x] of I) {
+        const l = L.get(id); const inBase = id in B;
+        if (l) {
+          const lc = !inBase || hash(l) !== B[id]; const ic = !inBase || hash(x) !== B[id];
+          if (!ic) res.push(l);
+          else if (!lc) { res.push(x); if (hash(l) !== hash(x)) inc(sum.updated, k); }
+          else if (hash(l) === hash(x)) res.push(l);
+          else { sum.conflicts++; const pick = stamp(l) > stamp(x) ? l : x; res.push(pick); if (pick === x) inc(sum.updated, k); }
+        } else if (inBase) { // deleted here after sending
+          if (hash(x) !== B[id]) sum.conflicts++; // changed there, deleted here: stays deleted
+        } else { res.push(x); inc(sum.added, k); } // new from the artifact
+      }
+      for (const [id, l] of L) {
+        if (I.has(id)) continue;
+        if (id in B) { if (hash(l) !== B[id]) { res.push(l); sum.conflicts++; } else inc(sum.removed, k); } // removed there
+        else { res.push(l); inc(sum.keptHere, k); } // new here since sending
+      }
+      out[k] = res.map((x) => JSON.parse(JSON.stringify(x)));
+    }
+    out.prompts = Object.assign({}, local.prompts || {});
+    for (const k of Object.keys(Object.assign({}, local.prompts, incoming.prompts))) {
+      const l = (local.prompts || {})[k] ?? null; const x = (incoming.prompts || {})[k] ?? null; const b = base && base.prompts ? base.prompts[k] : undefined;
+      if (hash(x) !== b && (b === undefined ? true : hash(l) === b)) out.prompts[k] = x;
+    }
+    if (base && hash(local.survey || null) === base.survey) out.survey = incoming.survey || null;
+    // keep the pieces consistent
+    const noteIds = new Set(out.notes.map((n) => n.id));
+    out.items = out.items.filter((i) => noteIds.has(i.noteId));
+    const itemIds = new Set(out.items.map((i) => i.id));
+    out.tasks = out.tasks.filter((t) => !t.itemId || itemIds.has(t.itemId));
+    const catIds = new Set(out.categories.map((c) => c.id));
+    for (const sys of defaultCategories().filter((c) => c.system)) if (!catIds.has(sys.id)) { out.categories.push(sys); catIds.add(sys.id); }
+    out.categories.forEach((c) => { if (c.parent && !catIds.has(c.parent)) c.parent = null; if (c.area && !catIds.has(c.area)) c.area = null; });
+    out.items.forEach((i) => { if (!catIds.has(i.cat)) i.cat = 'unsorted'; i.tags = (i.tags || []).filter((t) => catIds.has(t)); });
+    out.tasks.forEach((t) => { if (!catIds.has(t.cat)) t.cat = 'todo'; });
+    out.schema = Math.max(+local.schema || 1, +incoming.schema || 1);
+    return { state: out, summary: sum };
+  }
   /** keep only actions that point to things that exist; returns {actions, dropped} */
   /** the "reply" text from a JSON answer that is still being written (for the live chat bubble) */
   function partialReply(raw) {
@@ -1098,7 +1161,7 @@ Answer only with JSON: {"reply":"","actions":[],"remember":[]}`,
     partialReply, buildOrganizePrompt, bulkSplitPrompt, bulkOrganizePrompt, bulkSurveyPrompt, diff, changeRatio, countTerm, checkOrganize,
     checkSurvey, fmtDate, safeName, categoryMarkdown, allMarkdown, visibleTasks, validBackup, backupProblem, itemsIn, linkedTasks,
     editDistance, splitOriginal, taskSupport, taskDone, charChange, wordMatch, EDIT_RULES, buildFixPrompt, buildReport, nameCandidates, hideNames,
-    buildChatContext, buildAllNotesContext, noteNamed, buildChatPrompt, checkChatActions, checkRemember,
+    buildChatContext, buildAllNotesContext, noteNamed, buildChatPrompt, roundTripBase, mergeRoundTrip, checkChatActions, checkRemember,
   };
 })();
 if (typeof window !== 'undefined') window.MDCore = MDCore;
@@ -1276,7 +1339,11 @@ if (typeof module !== 'undefined') module.exports = MDCore;
      "artifact" (mind-desk-artifact.html, published on claude.ai: Claude answers, notes live in the artifact's private storage). */
   const TARGET = "artifact";
   const ART = TARGET === 'artifact';
-  const PLAT = ART ? window.MDArtifact : null; // artifact platform (storage, Claude, downloads)
+  const CLOUD = TARGET === 'cloud'; // third build (1.3.0): your own server, login, quick capture, optional paid API
+  const REMOTE = ART || CLOUD; // notes are saved somewhere else than this browser
+  const PLAT = ART ? window.MDArtifact : CLOUD ? window.MDCloud : null; // platform (storage, AI, downloads)
+  /** providers that take many notes per request (Claude in the artifact, your API key in the cloud) */
+  const bigAI = () => S.settings.provider === 'claude' || S.settings.provider === 'api';
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1330,7 +1397,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     },
   };
   // the artifact keeps notes in the artifact's private database (falls back to this browser's storage when there is none)
-  const store = ART ? PLAT.makeStore(pcStore) : pcStore;
+  const store = PLAT ? PLAT.makeStore(pcStore) : pcStore;
 
   function defaultSettings() {
     return {
@@ -1340,7 +1407,8 @@ if (typeof module !== 'undefined') module.exports = MDCore;
       oaUrl: 'http://localhost:3001/api/v1/openai', oaKey: '', oaModel: '', manualBatch: 20, survey: true, surveyMax: 8, theme: 'auto',
       claudeFast: 'auto', claudeCareful: 'auto', claudeEffort: 'auto', // artifact: which Claude answers in Fast / Careful
       chatAll: true, // artifact: the chat reads all notes (Claude can take them; the PC's small model cannot)
-      ...(ART ? { provider: 'claude' } : {}),
+      apiVendor: 'anthropic', apiFast: '', apiCareful: '', // cloud: your own API key (models chosen in Settings)
+      ...(ART ? { provider: 'claude' } : CLOUD ? { provider: 'manual' } : {}),
     };
   }
   function defaultState() {
@@ -1359,7 +1427,9 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     for (const k of ['claudeFast', 'claudeCareful']) if (out.settings[k] !== 'auto' && !CLAUDE_MODELS.some((m) => m.id === out.settings[k])) out.settings[k] = 'auto';
     if (!['auto', 'low', 'medium', 'high'].includes(out.settings.claudeEffort)) out.settings.claudeEffort = 'auto';
     if (ART) { out.settings.provider = 'claude'; out.settings.theme = 'auto'; } // the artifact always uses Claude and the viewer's theme
-    else if (out.settings.provider === 'claude') out.settings.provider = 'ollama'; // a backup from the artifact, restored on the PC
+    else if (out.settings.provider === 'claude') out.settings.provider = CLOUD ? 'manual' : 'ollama'; // a backup from the artifact, restored here
+    if (!CLOUD && out.settings.provider === 'api') out.settings.provider = 'ollama'; // the API key only works through the cloud server
+    if (!['anthropic', 'openai'].includes(out.settings.apiVendor)) out.settings.apiVendor = 'anthropic';
     out.prompts = Object.assign({ split: null, survey: null, organize: null, fix: null, chat: null }, (s && s.prompts) || {});
     for (const k of ['notes', 'items', 'tasks', 'words', 'rules', 'memory', 'chats', 'folderFiles', 'folderOriginals', 'runLog']) if (!Array.isArray(out[k])) out[k] = [];
     // 1.1.0: "My rules" become Memory (one list the AI uses everywhere)
@@ -1379,8 +1449,8 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     if (!LIFE.ok || LIFE.blocked || !S) return; // never write when the load failed or another window is in charge
     saveState = 'saving'; paintSaveState();
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(writeState, ART ? 700 : 250); // the artifact database is remote: gather quick changes into one write
-    if (ART || (opts && opts.folder === false)) return; // folder bookkeeping only: no new folder copy
+    saveTimer = setTimeout(writeState, REMOTE ? 700 : 250); // the artifact database is remote: gather quick changes into one write
+    if (REMOTE || (opts && opts.folder === false)) return; // folder bookkeeping only: no new folder copy
     clearTimeout(folderTimer);
     folderTimer = setTimeout(syncFolder, 1500);
   }
@@ -1395,8 +1465,8 @@ if (typeof module !== 'undefined') module.exports = MDCore;
       const ok = await store.putState(S, LIFE.rev);
       if (ok) { LIFE.rev = next; saveState = writeAgain ? 'saving' : 'saved'; } else { saveState = 'error'; blockWindow('changed'); }
     } catch (e) {
-      saveState = 'error'; toast('Could not save: ' + ((e && e.message) || (e && e.code) || e) + '. Mind Desk will try again' + (ART ? ' in a moment.' : ' with your next change.'), 6000);
-      if (ART) { LIFE.retry = Math.min(60000, (LIFE.retry || 2500) * 2); clearTimeout(saveTimer); saveTimer = setTimeout(writeState, LIFE.retry); } // the database can be briefly unavailable
+      saveState = 'error'; toast('Could not save: ' + ((e && e.message) || (e && e.code) || e) + '. Mind Desk will try again' + (REMOTE ? ' in a moment.' : ' with your next change.'), 6000);
+      if (REMOTE) { LIFE.retry = Math.min(60000, (LIFE.retry || 2500) * 2); clearTimeout(saveTimer); saveTimer = setTimeout(writeState, LIFE.retry); } // the database can be briefly unavailable
     } finally { writing = false; }
     if (saveState === 'saved') LIFE.retry = 0;
     paintSaveState();
@@ -1502,7 +1572,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
    */
   function ask(message, opts = {}) {
     const input = typeof opts.input === 'string';
-    if (!ART) return Promise.resolve(input ? window.prompt(message, opts.input) : window.confirm(message));
+    if (TARGET === 'pc') return Promise.resolve(input ? window.prompt(message, opts.input) : window.confirm(message));
     return new Promise((resolve) => {
       const old = $('#askbox'); if (old && old._done) old._done(input ? null : false);
       const o = document.createElement('div'); o.className = 'overlay askover'; o.id = 'askbox';
@@ -1676,10 +1746,38 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     { id: 'claude-fable-5-1', name: 'Fable 5.1', short: 'Fable', note: 'most capable, if your plan has it' },
   ];
   const TIER_NAME = { quick: 'quick', default: 'main', complex: 'most capable' };
-  const modelName = (id) => (CLAUDE_MODELS.find((m) => m.id === id) || { name: id }).name;
+  const modelName = (id) => (CLAUDE_MODELS.find((m) => m.id === id) || (typeof API_MODELS !== 'undefined' && [...API_MODELS.anthropic, ...API_MODELS.openai].find((m) => m.id === id)) || { name: id }).name;
   /** "claude-opus-5-5" → "Opus 5.5"; "tier:quick" → "Claude (quick model)" */
   const modelLabel = (v) => (String(v).startsWith('tier:') ? `Claude (${TIER_NAME[String(v).slice(5)] || String(v).slice(5)} model)` : modelName(v));
-  const choiceShort = (mode) => { const v = S.settings[mode === 'careful' ? 'claudeCareful' : 'claudeFast']; return v === 'auto' ? (mode === 'careful' ? 'Sonnet' : 'Haiku') : (CLAUDE_MODELS.find((m) => m.id === v) || { short: v }).short; };
+  /** cloud: models for your own API key (one list, shared with the server) */
+  const API_MODELS = {"_source":"Official price pages (platform.claude.com/docs/en/about-claude/pricing, developers.openai.com/api/docs/pricing), checked 22 Oct 2026. US$ per million tokens: [input, output].","anthropic":[{"id":"claude-haiku-5-5","name":"Claude Haiku 5.5","short":"Haiku","note":"fast, cheapest","price":[0.1,0.5],"longPrice":[0.5,2.5],"longFrom":100000},{"id":"claude-sonnet-5-5","name":"Claude Sonnet 5.5","short":"Sonnet","note":"balanced","price":[2,10]},{"id":"claude-opus-5-5","name":"Claude Opus 5.5","short":"Opus","note":"deepest, costs more","price":[4,20]},{"id":"claude-fable-5-1","name":"Claude Fable 5.1","short":"Fable","note":"most capable, most expensive","price":[10,50]}],"openai":[{"id":"gpt-6-luna","name":"GPT-6 Luna","short":"Luna","note":"small, cheapest","price":[0.1,0.5]},{"id":"gpt-6.1-sol","name":"GPT-6.1 Sol","short":"Sol","note":"balanced","price":[2,10]},{"id":"gpt-6-astra","name":"GPT-6 Astra","short":"Astra","note":"flagship, expensive","price":[10,50]}],"defaults":{"anthropic":["claude-haiku-5-5","claude-sonnet-5-5"],"openai":["gpt-6-luna","gpt-6.1-sol"]}}; // filled in at build from server/lib/models.json (prices: US$ per million tokens)
+  const API_DEFAULT = API_MODELS.defaults;
+  const apiModel = (mode) => { const v = S.settings.apiVendor; const id = S.settings[mode === 'careful' ? 'apiCareful' : 'apiFast']; return API_MODELS[v].find((m) => m.id === id) ? id : API_DEFAULT[v][mode === 'careful' ? 1 : 0]; };
+  const fmtCost = (usd) => (usd < 0.01 ? '<$0.01' : '$' + usd.toFixed(2));
+  const choiceShort = (mode) => {
+    if (S.settings.provider === 'api') { const id = apiModel(mode); return ([...API_MODELS.anthropic, ...API_MODELS.openai].find((m) => m.id === id) || { short: id }).short; }
+    const v = S.settings[mode === 'careful' ? 'claudeCareful' : 'claudeFast']; return v === 'auto' ? (mode === 'careful' ? 'Sonnet' : 'Haiku') : (CLAUDE_MODELS.find((m) => m.id === v) || { short: v }).short;
+  };
+  /** cloud: your API key through the server (which keeps the key, counts the cost and stops at your monthly limit) */
+  const API_STOP = { no_key: 1, limit_reached: 1, bad_key: 1, rate_limited: 1, not_logged_in: 1, no_credit: 1 };
+  async function apiChat(system, user, careful) {
+    const ctrl = new AbortController(); RUN.ctrl = ctrl; RUN.lastCost = 0;
+    try {
+      const r = await PLAT.aiChat(user ? system + '\n\n' + user : system, {
+        careful, signal: ctrl.signal,
+        onText: (text) => { liveUpdate('', text); if (RUN.onText) { try { RUN.onText(text); } catch (e) { /* ignore */ } } },
+      });
+      RUN.lastModel = r.model || null; RUN.lastCost = r.cost || 0; if (r.month != null) UI.monthCost = r.month;
+      if (r.truncated) { const e = new Error('The answer was cut off because it was too long. Fewer or shorter notes at a time will work.'); e.truncated = true; e.claude = true; throw e; }
+      return { content: r.text, thinking: '' };
+    } catch (e) {
+      if (e instanceof Error) { if (e.name === 'AbortError') throw abortErr(); throw e; }
+      if (e && e.code === 'cancelled') throw abortErr();
+      const err = new Error((e && e.message) || 'The AI service did not answer.'); err.code = e && e.code; err.claude = true;
+      if (API_STOP[err.code]) err.conn = true; // stop the run, never retry
+      throw err;
+    } finally { if (RUN.ctrl === ctrl) RUN.ctrl = null; }
+  }
   function claudeErr(e) {
     const code = (e && e.code) || 'upstream_error';
     if (code === 'cancelled') return abortErr();
@@ -1721,9 +1819,9 @@ if (typeof module !== 'undefined') module.exports = MDCore;
   /** one AI request that must return JSON; tries twice. Returns {data, thinking, ms, cut} and writes a line to the run log */
   async function aiJSON(step, system, user, noteName) {
     let last; let thinking = ''; let cut = false; const t0 = Date.now();
-    let think = S.settings.provider === 'claude' ? RUN.mode === 'careful' : thinks(step);
+    let think = bigAI() ? RUN.mode === 'careful' : thinks(step);
     const log = (ok, err) => {
-      S.runLog.push({ at: Date.now(), step, note: noteName || '', mode: think || cut ? 'careful' : 'fast', ms: Date.now() - t0, ok, err: err || '', cut, thinkChars: thinking.length, ...(S.settings.provider === 'claude' && RUN.lastModel ? { model: modelLabel(RUN.lastModel) } : {}) });
+      S.runLog.push({ at: Date.now(), step, note: noteName || '', mode: think || cut ? 'careful' : 'fast', ms: Date.now() - t0, ok, err: err || '', cut, thinkChars: thinking.length, ...(bigAI() && RUN.lastModel ? { model: modelLabel(RUN.lastModel) } : {}), ...(RUN.lastCost ? { cost: RUN.lastCost } : {}) });
       if (S.runLog.length > 300) S.runLog.splice(0, S.runLog.length - 300);
     };
     liveStart(step);
@@ -1733,6 +1831,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
         let r;
         try {
           r = S.settings.provider === 'claude' ? await claudeChat(system, user, RUN.mode === 'careful')
+            : S.settings.provider === 'api' ? await apiChat(system, user, RUN.mode === 'careful')
             : S.settings.provider === 'openai' ? await openaiChat(system, user) : await ollamaChat(system, user, C.SCHEMAS[step], step === 'organize' || step === 'fix' ? 1 : 0.2, think);
         } catch (e) {
           if (!e.thinkTooLong) throw e;
@@ -1774,10 +1873,10 @@ if (typeof module !== 'undefined') module.exports = MDCore;
   }
 
   /** steps that send many notes in one request: copy & paste mode, and Claude in the artifact */
-  const batched = () => S.settings.provider === 'manual' || S.settings.provider === 'claude';
+  const batched = () => S.settings.provider === 'manual' || bigAI();
   /** one batched request: copy & paste shows the prompt; Claude answers it directly */
   async function askBatch(step, title, text, name) {
-    if (S.settings.provider !== 'claude') return askManual(title, text);
+    if (!bigAI()) return askManual(title, text);
     return (await aiJSON(step, text, '', name || title)).data;
   }
   /** cut a list into groups of at most maxN entries and about maxChars characters */
@@ -1844,7 +1943,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
       if (blocks.length <= 1) addItemsFromGroups(n, blocks, blocks.length ? [[0]] : []); else payload.push({ id: n.id, note: n, blocks });
     }
     if (!payload.length) return;
-    const claude = S.settings.provider === 'claude';
+    const claude = bigAI();
     // copy & paste: one prompt for everything; Claude: parts of about 30,000 characters
     const parts = claude ? groupBy(payload, (p) => p.note.text.length, 1e9, CLAUDE_LIMIT.split) : [payload];
     for (let k = 0; k < parts.length; k++) {
@@ -1897,7 +1996,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
 
   function applyResult(it, chk, thinking, ms, cut) {
     if (!alive(it)) return; // deleted or replaced meanwhile: drop the answer
-    it.thinking = thinking ? String(thinking).slice(0, 20000) : undefined; it.mode = RUN.mode || 'fast'; it.ms = ms || undefined; it.model = S.settings.provider === 'claude' && RUN.lastModel ? RUN.lastModel : undefined;
+    it.thinking = thinking ? String(thinking).slice(0, 20000) : undefined; it.mode = RUN.mode || 'fast'; it.ms = ms || undefined; it.model = bigAI() && RUN.lastModel ? RUN.lastModel : undefined;
     if (cut) chk.flags.push('thinkcut');
     it.tags = Array.isArray(it.tags) ? it.tags : []; // one place rule: the AI no longer adds "also show in"; your own choices stay
     it.title = chk.title; it.cat = chk.category; it.text = chk.text; it.flags = chk.flags; it.lost = chk.lost; it.error = '';
@@ -2019,7 +2118,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
         }
       } else unsurveyed.forEach((i) => { i.surveyed = true; });
       const todo = S.items.filter((i) => i.status === 'pending' && mineItem(i));
-      if (S.settings.provider === 'claude') await organizeClaude(todo);
+      if (bigAI()) await organizeClaude(todo);
       else if (manual) { setProgress('Organizing', 0, 0); await organizeManual(todo); } else {
         for (let i = 0; i < todo.length; i++) {
           if (RUN.stop) throw abortErr();
@@ -2041,7 +2140,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
 
   /* ================= folder sync ================= */
   async function initFolder() {
-    if (ART || !('showDirectoryPicker' in window) || !store.db) return;
+    if (TARGET !== 'pc' || !('showDirectoryPicker' in window) || !store.db) return;
     try {
       const h = await store.get('folder'); if (!h) return;
       FOLDER.handle = h; FOLDER.name = h.name;
@@ -2169,7 +2268,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
       ${searchable ? `<input type="search" id="search" placeholder="Search…" value="${esc(UI.search)}" aria-label="Search">` : ''}
       <div class="grow"></div><div class="progress" id="progress"></div>
       ${S.settings.provider === 'manual' ? '' : `<select id="modeSel" data-set="mode" aria-label="Fast or careful" ${RUN.active ? 'disabled' : ''} title="Fast: quick answers. Careful: the AI thinks first (slower, better at understanding what you meant).">
-        <option value="fast"${S.settings.mode === 'fast' ? ' selected' : ''}>⚡ Fast${ART ? ' · ' + esc(choiceShort('fast')) : ''}</option><option value="careful"${S.settings.mode === 'careful' ? ' selected' : ''}>🧠 Careful${ART ? ' · ' + esc(choiceShort('careful')) : ''}</option></select>`}
+        <option value="fast"${S.settings.mode === 'fast' ? ' selected' : ''}>⚡ Fast${bigAI() ? ' · ' + esc(choiceShort('fast')) : ''}</option><option value="careful"${S.settings.mode === 'careful' ? ' selected' : ''}>🧠 Careful${bigAI() ? ' · ' + esc(choiceShort('careful')) : ''}</option></select>`}
       <button class="btn primary" data-act="organizeAll" ${RUN.active ? 'disabled' : ''} title="Split, ask questions and organize all new notes">✨ Organize all${pendingWork ? ` (${pendingWork})` : ''}</button>`;
     if (RUN.active) setProgress(RUN.label, RUN.done, RUN.total);
   }
@@ -2415,7 +2514,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     return `<div class="pane list chatlist"><div class="tools"><button class="btn" data-act="newChat">＋ New chat</button></div>${list || '<p class="muted small" style="padding:12px">Your chats are saved here.</p>'}</div>
       <div class="chatmain"><div class="msgs" id="msgs">${msgs}</div>
       <div class="composer"><textarea id="chatIn" rows="2" placeholder="Ask about your notes, or tell Mind Desk what to change… (Enter = send, Shift+Enter = new line)">${esc(UI.chatDraft || '')}</textarea><button class="btn primary" data-act="sendChat" ${RUN.active ? 'disabled' : ''}>Send</button></div>
-      <div class="muted small" style="padding:0 16px 10px">${S.settings.provider === 'manual' ? 'Copy & paste mode: your message goes to ChatGPT or Claude.' : (S.settings.mode === 'careful' ? '🧠 Careful: the AI thinks first (slower).' : '⚡ Fast answers.') + ' Change it at the top.'} Memory: ${S.memory.length} item(s).${ART ? ` <label class="small" style="margin-left:8px" title="On: Claude reads all your notes with every message (organized or not). Off: only the notes that match your message (uses less of your plan)."><input type="checkbox" id="set-chatAll" data-set="chatAll" ${S.settings.chatAll !== false ? 'checked' : ''}> Read all my notes (${S.notes.length})</label>` : ''}</div></div>`;
+      <div class="muted small" style="padding:0 16px 10px">${S.settings.provider === 'manual' ? 'Copy & paste mode: your message goes to ChatGPT or Claude.' : (S.settings.mode === 'careful' ? '🧠 Careful: the AI thinks first (slower).' : '⚡ Fast answers.') + ' Change it at the top.'} Memory: ${S.memory.length} item(s).${bigAI() ? ` <label class="small" style="margin-left:8px" title="On: Claude reads all your notes with every message (organized or not). Off: only the notes that match your message (uses less of your plan)."><input type="checkbox" id="set-chatAll" data-set="chatAll" ${S.settings.chatAll !== false ? 'checked' : ''}> Read all my notes (${S.notes.length})</label>` : ''}</div></div>`;
   }
   function scrollChat() { const m = $('#msgs'); if (m) m.scrollTop = m.scrollHeight; }
   function findAction(el) {
@@ -2731,7 +2830,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
       save(); render(); setProgress(RUN.mode === 'careful' ? 'Thinking about your message' : 'Answering', 0, 0);
       const out = { id: C.uid('a'), role: 'assistant', text: '', at: 0 };
       try {
-        const p = C.buildChatPrompt(prompt('chat'), S, history, text, Object.assign(ctx(), ART && S.settings.chatAll !== false ? { allNotes: { maxBytes: 150000 } } : {}));
+        const p = C.buildChatPrompt(prompt('chat'), S, history, text, Object.assign(ctx(), bigAI() && S.settings.chatAll !== false ? { allNotes: { maxBytes: 150000 } } : {}));
         let data; let thinking = '';
         if (S.settings.provider === 'manual') data = await askManual('Chat: your message for ChatGPT or Claude', p.system + '\n\n' + p.user);
         else {
@@ -2743,7 +2842,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
         const acts = C.checkChatActions(data.actions, S, p.ids);
         out.text = String(data.reply || '').trim() || (acts.actions.length ? 'Here is what I suggest:' : '(no answer)');
         if (thinking) out.thinking = thinking.slice(0, 20000);
-        if (S.settings.provider === 'claude' && RUN.lastModel) out.model = RUN.lastModel;
+        if (bigAI() && RUN.lastModel) out.model = RUN.lastModel;
         out.actions = acts.actions.map((a) => Object.assign({ id: C.uid('x'), status: a.type === 'show_note' ? 'shown' : 'pending' }, a));
         out.remember = C.checkRemember(data.remember, S.memory).map((t) => ({ id: C.uid('r'), text: t, status: 'pending' }));
         if (acts.dropped) out.dropped = acts.dropped;
@@ -2834,7 +2933,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
       RUN.active = true; RUN.stop = false; RUN.mode = S.settings.mode;
       try {
         const a = await aiJSON('organize', p.system, p.user, 'test note'); const chk = C.checkOrganize(a.data, sample, c);
-        setConn(`<div class="banner info">✓ The AI answered in ${((Date.now() - t0) / 1000).toFixed(1)} s (${RUN.mode === 'careful' ? 'Careful' : 'Fast'} mode${S.settings.provider === 'claude' && RUN.lastModel ? ', ' + esc(modelLabel(RUN.lastModel)) : ''}).<br><b>Before:</b> ${esc(sample)}<br><b>After:</b> ${esc(chk.text)}<br><b>Category:</b> ${esc(C.catPath(cats(), chk.category))}${chk.tasks.length ? '<br><b>Tasks:</b> ' + esc(chk.tasks.map((x) => x.text).join(' · ')) : ''}</div>${thinkBox(a.thinking)}`);
+        setConn(`<div class="banner info">✓ The AI answered in ${((Date.now() - t0) / 1000).toFixed(1)} s (${RUN.mode === 'careful' ? 'Careful' : 'Fast'} mode${bigAI() && RUN.lastModel ? ', ' + esc(modelLabel(RUN.lastModel)) : ''}${RUN.lastCost ? ' · ' + esc(fmtCost(RUN.lastCost)) : ''}).<br><b>Before:</b> ${esc(sample)}<br><b>After:</b> ${esc(chk.text)}<br><b>Category:</b> ${esc(C.catPath(cats(), chk.category))}${chk.tasks.length ? '<br><b>Tasks:</b> ' + esc(chk.tasks.map((x) => x.text).join(' · ')) : ''}</div>${thinkBox(a.thinking)}`);
       } catch (e) { setConn(`<div class="banner bad">${esc(e.message)}</div>${e.conn ? connHelpHtml() : ''}`); } finally { RUN.active = false; }
     },
     addCat() {
@@ -3016,11 +3115,11 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     }
     RUN.stop = true; if (RUN.ctrl) RUN.ctrl.abort(); if (RUN.manualReject) RUN.manualReject(); if (RUN.surveyWait) RUN.surveyWait.reject(abortErr());
     const text = reason === 'changed'
-      ? (ART ? 'Your notes were changed in Mind Desk on another device or in another tab. To avoid overwriting them, this page stopped saving. Load the newest version to carry on here.' : 'Your notes were changed in another Mind Desk window. To avoid overwriting them, this window stopped saving.')
+      ? (REMOTE ? 'Your notes were changed in Mind Desk on another device or in another tab. To avoid overwriting them, this page stopped saving. Load the newest version to carry on here.' : 'Your notes were changed in another Mind Desk window. To avoid overwriting them, this window stopped saving.')
       : 'Mind Desk is open in another window or tab. Only one window can work at a time, so nothing gets overwritten.';
     const o = screen(`<h2>Mind Desk is open somewhere else</h2><p>${text}</p>
       ${unsaved ? '<p class="banner">This window had changes that were not saved yet. A copy was kept: the other window offers it, or download it here.</p>' : ''}
-      <div class="actions"><button class="btn primary" id="takeOver">${ART && reason === 'changed' ? 'Load the newest version' : 'Use Mind Desk here'}</button>${S ? '<button class="btn" id="dlCopy">Download this window’s copy</button>' : ''}</div>
+      <div class="actions"><button class="btn primary" id="takeOver">${REMOTE && reason === 'changed' ? 'Load the newest version' : 'Use Mind Desk here'}</button>${S ? '<button class="btn" id="dlCopy">Download this window’s copy</button>' : ''}</div>
       <p class="muted small">The other window will then stop and show this message.</p>`, 'data-blocked');
     $('#takeOver', o).onclick = takeOver;
     if ($('#dlCopy', o)) $('#dlCopy', o).onclick = () => download(`mind-desk-window-copy-${today()}.json`, JSON.stringify(exportObj(), null, 1), 'application/json');
@@ -3073,7 +3172,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
   let wired = false;
   async function start() {
     window.MD = { get state() { return S; }, ACT, organizeAll, render, save, store, RUN, UI, FOLDER, LIFE, syncFolder, VERSION, TARGET, ask };
-    if (ART) {
+    if (PLAT) {
       await PLAT.init(); // asks claude.ai for storage, Claude and downloads (each may be missing)
       // another device or tab saved newer notes: stop saving here (the same protection as two windows on the PC)
       PLAT.onRemoteChange = () => { if (LIFE.ok && !LIFE.blocked) blockWindow('changed'); };
