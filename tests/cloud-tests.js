@@ -2,7 +2,7 @@
 // Tests for the cloud version (server/ + server/public/app.html): server checks over HTTP, then the app in Chromium.
 // The Claude and ChatGPT APIs are replaced by tests/fake-cloud-ai.js. The round trip uses the real artifact build
 // (mind-desk-artifact.html) with tests/artifact-stub.js in place of claude.ai.
-// Usage: PW=<playwright> node tests/cloud-tests.js        (ONLY=S3 or ONLY=B2 runs one test)
+// Usage: PW=<playwright> node tests/cloud-tests.js        (ONLY=S3 or ONLY=B2 runs one test; CLOUD_DIR=… tests an unzipped release)
 'use strict';
 const path = require('path');
 const fs = require('fs');
@@ -23,8 +23,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const AI_PORT = 11610;
 process.env.MD_ANTHROPIC_URL = 'http://127.0.0.1:' + AI_PORT;
 process.env.MD_OPENAI_URL = 'http://127.0.0.1:' + AI_PORT;
-const { createServer } = require('../server/server.js');
-const { totpAt, stepNow } = require('../server/lib/auth.js');
+// CLOUD_DIR=<unzipped mind-desk-cloud folder> tests the release zip instead of server/
+const SERVER_DIR = path.resolve(process.env.CLOUD_DIR || path.join(ROOT, 'server'));
+const { createServer } = require(path.join(SERVER_DIR, 'server.js'));
+const { totpAt, stepNow } = require(path.join(SERVER_DIR, 'lib', 'auth.js'));
 async function server(opts = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md-cloud-'));
   const clock = { t: Date.now() };

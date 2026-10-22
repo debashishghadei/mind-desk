@@ -59,4 +59,13 @@ if (process.argv.includes('--zip')) {
   const zip = path.join(dist, `mind-desk-${version}.zip`); fs.rmSync(zip, { force: true });
   execFileSync('python3', ['-c', `import shutil;shutil.make_archive(${JSON.stringify(zip.replace(/\.zip$/, ''))},'zip',${JSON.stringify(dist)},'mind-desk')`]);
   console.log('zip:', zip);
+
+  /* cloud zip: the server folder without its data, plus the setup guide */
+  const cstage = path.join(dist, 'mind-desk-cloud'); fs.rmSync(cstage, { recursive: true, force: true });
+  fs.cpSync(path.join(root, 'server'), cstage, { recursive: true, filter: (src) => !/[\\/]data([\\/]|$)|\.tmp-/.test(path.relative(root, src)) });
+  fs.copyFileSync(path.join(root, 'docs', 'CLOUD-SETUP.md'), path.join(cstage, 'README.md'));
+  fs.copyFileSync(path.join(root, 'CHANGELOG.md'), path.join(cstage, 'CHANGELOG.md'));
+  const czip = path.join(dist, `mind-desk-cloud-${version}.zip`); fs.rmSync(czip, { force: true });
+  execFileSync('python3', ['-c', `import shutil;shutil.make_archive(${JSON.stringify(czip.replace(/\.zip$/, ''))},'zip',${JSON.stringify(dist)},'mind-desk-cloud')`]);
+  console.log('zip:', czip);
 }

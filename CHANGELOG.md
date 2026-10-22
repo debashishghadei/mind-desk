@@ -2,6 +2,21 @@
 
 All notable changes to Mind Desk. Versions follow semantic versioning.
 
+## 1.3.0 — 2026-10-22
+
+**Mind Desk Cloud: the same Mind Desk on your own server** (third version from the same source; PC and artifact work as before).
+
+- New folder `server/` (Node.js 18+, no extra packages) and `mind-desk-cloud-1.3.0.zip`. Setup guide: `docs/CLOUD-SETUP.md` (try it on the PC first, then on Hostinger).
+- **Login:** user name, password (12+ characters) and a 6-digit code from an authenticator app, plus 8 one-time recovery codes. First run asks for a setup code from the server's data folder. 5 wrong tries lock that address for 15 minutes. Logged in for 30 days per device; changing the password logs out the other devices; Log out in Settings.
+- **Notes on the server:** the same screens as the PC version. Two devices cannot overwrite each other: a save from an older version is refused and the page offers “Load the newest version”.
+- **📱 Quick idea** (`/capture`): a small page for the phone (add it to the home screen). Ideas typed without internet wait on the phone and are sent when online; they land in the Inbox the next time Mind Desk is open.
+- **Organize free with Claude:** 📤 **Send to Claude** downloads everything for the Mind Desk artifact; after organizing there, **Download backup** and here 📥 **Bring back**. Bring back merges: organized items, Memory and words come in, ideas captured here in the meantime are kept, where both sides changed the newer one wins. You see a summary first, and the server keeps a copy before merging.
+- **Your own API key (optional):** Claude (Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.1) or ChatGPT (GPT-6 Luna, GPT-6.1 Sol, GPT-6 Astra), chosen for ⚡ Fast and 🧠 Careful. The key stays on the server (never sent back to the browser, never in backups). Every request shows its cost; Settings shows the month's total; at your monthly limit (default $5) Mind Desk stops and says so. Same batching, checks and chat (reads all notes) as the artifact.
+- **Backups on the server:** one per day (last 30) and one before every Bring back and restore (last 20).
+- Security: HTTPS-only cookie behind the hosting's proxy, a strict Content Security Policy (only Mind Desk's own scripts can run), every change needs a header other sites cannot send, no embedding in other sites.
+
+Also in all versions: the one inline click handler (“Try again” on the error screen) is now a normal listener.
+
 ## 1.2.2 — 2026-10-22
 
 **The chat reads your notes, also before you organize them** (found by the owner: pasted notes named 1–4, not organized, the chat could only see their names).

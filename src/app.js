@@ -856,7 +856,7 @@
   /* ================= export / import ================= */
   function exportObj() {
     const o = JSON.parse(JSON.stringify(S)); o.exportedAt = Date.now(); o.version = VERSION;
-    delete o.folderFiles; delete o.folderOriginals; delete o.rev; delete o.runLog; delete o.sentToClaude; // roundTrip stays: the artifact passes it back so the cloud can match its answer if (o.settings) delete o.settings.oaKey; // never put the API key in a backup
+    delete o.folderFiles; delete o.folderOriginals; delete o.rev; delete o.runLog; delete o.sentToClaude; if (o.settings) delete o.settings.oaKey; // never put the API key in a backup (roundTrip stays: the artifact passes it back so the cloud can match its answer)
     return o;
   }
   function download(name, text, type) {
