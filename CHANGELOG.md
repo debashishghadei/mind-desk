@@ -2,6 +2,14 @@
 
 All notable changes to Mind Desk. Versions follow semantic versioning.
 
+## 1.2.2 — 2026-10-22
+
+**The chat reads your notes, also before you organize them** (found by the owner: pasted notes named 1–4, not organized, the chat could only see their names).
+
+- Artifact: **Read all my notes** (switch under the chat box, on by default). With every message Claude gets all your notes, newest first, with their own full text, organized or not, plus the items made from them, all tasks and the counts per category. A very long note is cut at 40,000 characters and Claude is told so; if everything together is too much for one request (about 150 KB), the oldest notes are left out and named, so Claude can say it could not read them. Turn the switch off to send only the notes that match your message (uses less of your plan).
+- Both versions: notes named with a number are found more easily: “note 1”, “tab 1”, “#1”, “what’s in 1?”, “first note”, “note one”, “1st note” (not “1.5 lakh” or “1 kg”). A named note that is not organized yet now sends up to 4,000 characters (was 2,000) and says when it was cut.
+- Both versions: a **«** button at the top of the menu hides it (remembered); **☰** brings it back.
+
 ## 1.2.1 — 2026-10-22
 
 **Choose which Claude answers** (artifact).

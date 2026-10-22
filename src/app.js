@@ -70,6 +70,7 @@
       thinkLimitSec: 120, editStyle: 'typos', sidebar: 'show',
       oaUrl: 'http://localhost:3001/api/v1/openai', oaKey: '', oaModel: '', manualBatch: 20, survey: true, surveyMax: 8, theme: 'auto',
       claudeFast: 'auto', claudeCareful: 'auto', claudeEffort: 'auto', // artifact: which Claude answers in Fast / Careful
+      chatAll: true, // artifact: the chat reads all notes (Claude can take them; the PC's small model cannot)
       ...(ART ? { provider: 'claude' } : {}),
     };
   }
@@ -1145,7 +1146,7 @@
     return `<div class="pane list chatlist"><div class="tools"><button class="btn" data-act="newChat">＋ New chat</button></div>${list || '<p class="muted small" style="padding:12px">Your chats are saved here.</p>'}</div>
       <div class="chatmain"><div class="msgs" id="msgs">${msgs}</div>
       <div class="composer"><textarea id="chatIn" rows="2" placeholder="Ask about your notes, or tell Mind Desk what to change… (Enter = send, Shift+Enter = new line)">${esc(UI.chatDraft || '')}</textarea><button class="btn primary" data-act="sendChat" ${RUN.active ? 'disabled' : ''}>Send</button></div>
-      <div class="muted small" style="padding:0 16px 10px">${S.settings.provider === 'manual' ? 'Copy & paste mode: your message goes to ChatGPT or Claude.' : (S.settings.mode === 'careful' ? '🧠 Careful: the AI thinks first (slower).' : '⚡ Fast answers.') + ' Change it at the top.'} Memory: ${S.memory.length} item(s).</div></div>`;
+      <div class="muted small" style="padding:0 16px 10px">${S.settings.provider === 'manual' ? 'Copy & paste mode: your message goes to ChatGPT or Claude.' : (S.settings.mode === 'careful' ? '🧠 Careful: the AI thinks first (slower).' : '⚡ Fast answers.') + ' Change it at the top.'} Memory: ${S.memory.length} item(s).${ART ? ` <label class="small" style="margin-left:8px" title="On: Claude reads all your notes with every message (organized or not). Off: only the notes that match your message (uses less of your plan)."><input type="checkbox" id="set-chatAll" data-set="chatAll" ${S.settings.chatAll !== false ? 'checked' : ''}> Read all my notes (${S.notes.length})</label>` : ''}</div></div>`;
   }
   function scrollChat() { const m = $('#msgs'); if (m) m.scrollTop = m.scrollHeight; }
   function findAction(el) {
@@ -1309,6 +1310,7 @@
       S.settings.sidebar = S.settings.sidebar === 'hide' ? 'show' : 'hide'; applySide(); save(); paintTop();
     },
     closeSide() { UI.sideOpen = false; applySide(); },
+    hideSide() { if (narrow()) { UI.sideOpen = false; applySide(); return; } if (S.settings.sidebar !== 'hide') ACT.toggleSide(); },
     hideLive() { UI.hideLive = true; livePaint(); },
     stopRun() {
       RUN.stop = true; if (RUN.ctrl) RUN.ctrl.abort();
@@ -1460,7 +1462,7 @@
       save(); render(); setProgress(RUN.mode === 'careful' ? 'Thinking about your message' : 'Answering', 0, 0);
       const out = { id: C.uid('a'), role: 'assistant', text: '', at: 0 };
       try {
-        const p = C.buildChatPrompt(prompt('chat'), S, history, text, ctx());
+        const p = C.buildChatPrompt(prompt('chat'), S, history, text, Object.assign(ctx(), ART && S.settings.chatAll !== false ? { allNotes: { maxBytes: 150000 } } : {}));
         let data; let thinking = '';
         if (S.settings.provider === 'manual') data = await askManual('Chat: your message for ChatGPT or Claude', p.system + '\n\n' + p.user);
         else {

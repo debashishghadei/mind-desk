@@ -613,6 +613,54 @@ Answer only with JSON: {"reply":"","actions":[],"remember":[]}`,
    * the best matching items and (when asked about to-dos) the tasks. Kept small for local models.
    * Returns {text, ids:{notes, items, tasks}}
    */
+  const ORDINAL = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth'];
+  /** does the message name this note? Numbers ("1") count as "note 1", "tab 1", "#1", "in 1", "1st note", "first note", "note one"… */
+  function noteNamed(name, lower) {
+    const nm = String(name || '').toLowerCase().trim(); if (!nm) return false;
+    if (/^\d+$/.test(nm)) {
+      const k = +nm; const ord = ORDINAL[k - 1]; const word = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'][k - 1];
+      const num = '(?:' + nm + (ord ? '|' + ord : '') + (word ? '|' + word : '') + (k === 1 ? '|1st' : k === 2 ? '|2nd' : k === 3 ? '|3rd' : '|' + nm + 'th') + ')';
+      return new RegExp('\\b(?:notes?|tabs?|no\\.?|number|#)\\s*#?\\s*' + num + '\\b|#' + nm + '\\b|"' + nm + '"|“' + nm + '”|\\b(?:in|of|from)\\s+' + nm + '\\b(?![.,:]\\d)|\\b' + num + '\\s+(?:note|tab)\\b').test(lower);
+    }
+    return lower.includes(nm) || (nm.length > 3 && lower.includes('"' + nm));
+  }
+  const utf8Len = (t) => { let n = 0; for (const ch of String(t)) { const c = ch.codePointAt(0); n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4; } return n; };
+  /**
+   * "Read all my notes" (artifact, Claude): every note's own text, newest first, organized or not, then items and tasks.
+   * Limited to about maxBytes (Claude can take ~256 KiB per request); what does not fit is named as left out.
+   */
+  function buildAllNotesContext(state, opts) {
+    const cats = state.categories; const ids = { notes: new Set(), items: new Set(), tasks: new Set() };
+    const maxBytes = (opts && opts.maxBytes) || 150000; const perNote = (opts && opts.perNote) || 40000;
+    const L = ['All your notes, newest first (organized or not). Each NOTE shows the person\'s own original text.'];
+    let used = 0; const left = [];
+    const notes = [...state.notes].sort((a, b) => b.addedAt - a.addedAt);
+    for (const n of notes) {
+      const its = state.items.filter((i) => i.noteId === n.id && i.status !== 'pending').sort((a, b) => a.order - b.order);
+      const status = n.status === 'new' ? 'not organized yet' : its.length ? its.length + ' item(s)' : 'being organized';
+      let body = n.text; let cut = '';
+      if (body.length > perNote) { cut = `\n[… cut: only the first ${perNote.toLocaleString('en')} of ${body.length.toLocaleString('en')} characters are shown]`; body = body.slice(0, perNote); }
+      const block = `\nNOTE [${n.id}] "${n.name}" · added ${fmtDate(n.addedAt)} · ${status}\n<<<\n${body}\n>>>${cut}`;
+      const b = utf8Len(block);
+      if (used + b > maxBytes) { left.push(n); continue; }
+      used += b; L.push(block); ids.notes.add(n.id);
+      if (its.length) {
+        L.push('Items made from it:');
+        for (const it of its) {
+          ids.items.add(it.id);
+          const tx = it.text === it.original ? '(same text as in the note)' : (it.text.length > 600 ? it.text.slice(0, 600) + ' …' : it.text);
+          const line = `ITEM [${it.id}] "${it.title}" · ${catPath(cats, it.cat)} · ${it.status === 'review' ? 'waiting for review' : 'approved'}\n${tx}`;
+          used += utf8Len(line); L.push(line);
+        }
+      }
+    }
+    if (left.length) L.push('', `NOT INCLUDED (too much text for one message): ${left.length} older note(s): ${left.slice(0, 40).map((n) => `"${n.name}"`).join(', ')}${left.length > 40 ? ' …' : ''}. If the person asks about these, say you could not read them this time and suggest naming the note in the message.`);
+    const tasks = visibleTasks(state).slice(0, 300);
+    if (tasks.length) L.push('', 'Tasks:');
+    for (const t of tasks) { ids.tasks.add(t.id); L.push(`TASK [${t.id}] [${t.done ? 'x' : ' '}] ${t.text} · ${catPath(cats, t.cat)}`); }
+    L.push('', 'Items per category: ' + assignableCats(cats).map((c) => `${catPath(cats, c.id)} ${state.items.filter((i) => i.status !== 'pending' && i.cat === c.id).length}`).join(', '));
+    return { text: L.join('\n'), ids, left: left.length };
+  }
   function buildChatContext(state, message, recent) {
     const cats = state.categories; const q = String(message) + ' ' + (recent || '');
     const words = chatWords(q); const lower = q.toLowerCase();
@@ -620,11 +668,7 @@ Answer only with JSON: {"reply":"","actions":[],"remember":[]}`,
     const L = [];
     const visibleItems = state.items.filter((i) => i.status !== 'pending');
     // notes named in the message ("note 4", "Notepad tab 3", "4")
-    const named = state.notes.filter((n) => {
-      const nm = n.name.toLowerCase().trim(); if (!nm) return false;
-      if (/^\d+$/.test(nm)) return new RegExp('\\bnote\\s*#?\\s*' + nm + '\\b|"' + nm + '"|“' + nm + '”').test(lower);
-      return lower.includes(nm) || (nm.length > 3 && lower.includes('"' + nm));
-    });
+    const named = state.notes.filter((n) => noteNamed(n.name, lower));
     L.push('Overview:');
     L.push('Notes: ' + state.notes.slice(-30).map((n) => `[${n.id}] "${n.name}" (${n.status === 'new' ? 'not organized' : state.items.filter((i) => i.noteId === n.id).length + ' items'})`).join('; '));
     state.notes.slice(-30).forEach((n) => ids.notes.add(n.id));
@@ -638,7 +682,7 @@ Answer only with JSON: {"reply":"","actions":[],"remember":[]}`,
     for (const n of named.slice(0, 2)) {
       ids.notes.add(n.id);
       const its = visibleItems.filter((i) => i.noteId === n.id).sort((a, b) => a.order - b.order);
-      L.push('', `NOTE [${n.id}] "${n.name}" — ${its.length ? its.length + ' items:' : 'not organized yet. Original text:\n' + n.text.slice(0, 2000)}`);
+      L.push('', `NOTE [${n.id}] "${n.name}" — ${its.length ? its.length + ' items:' : 'not organized yet. Original text:\n' + n.text.slice(0, 4000) + (n.text.length > 4000 ? `\n[… cut: the note has ${n.text.length.toLocaleString('en')} characters]` : '')}`);
       for (const it of its) { const t = itemLine(it); if (budget - t.length < 0) break; budget -= t.length; L.push(t); }
     }
     // best matching other items
@@ -665,7 +709,7 @@ Answer only with JSON: {"reply":"","actions":[],"remember":[]}`,
   function buildChatPrompt(tpl, state, chat, message, ctx) {
     const hist = (chat.messages || []).slice(-10);
     const recent = hist.filter((m) => m.role === 'user').slice(-2).map((m) => m.text).join(' ');
-    const c = buildChatContext(state, message, recent);
+    const c = ctx.allNotes ? buildAllNotesContext(state, ctx.allNotes) : buildChatContext(state, message, recent);
     const mem = (ctx.memory || []).map((m) => '- ' + m).join('\n') || '(nothing yet)';
     const system = fill(tpl, { memory: mem, words: wordLines(ctx.words), categories: catLines(ctx.cats), todoCategories: todoLines(ctx.cats), context: c.text });
     let user = '';
@@ -828,7 +872,7 @@ Answer only with JSON: {"reply":"","actions":[],"remember":[]}`,
     partialReply, buildOrganizePrompt, bulkSplitPrompt, bulkOrganizePrompt, bulkSurveyPrompt, diff, changeRatio, countTerm, checkOrganize,
     checkSurvey, fmtDate, safeName, categoryMarkdown, allMarkdown, visibleTasks, validBackup, backupProblem, itemsIn, linkedTasks,
     editDistance, splitOriginal, taskSupport, taskDone, charChange, wordMatch, EDIT_RULES, buildFixPrompt, buildReport, nameCandidates, hideNames,
-    buildChatContext, buildChatPrompt, checkChatActions, checkRemember,
+    buildChatContext, buildAllNotesContext, noteNamed, buildChatPrompt, checkChatActions, checkRemember,
   };
 })();
 if (typeof window !== 'undefined') window.MDCore = MDCore;

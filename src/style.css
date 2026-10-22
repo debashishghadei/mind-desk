@@ -32,6 +32,9 @@ a{color:var(--accent)}
 .brand .logo{width:30px;height:30px;border-radius:8px;background:var(--accent);color:var(--accent-ink);display:grid;place-items:center;font-weight:700}
 .brand b{font-size:16px;letter-spacing:.2px}
 .brand small{display:block;color:var(--ink3);font-size:11px}
+.brand .grow{flex:1;min-width:0}
+.sideclose{font-size:18px;line-height:1;color:var(--ink3)!important;padding:4px 8px!important}
+.sideclose:hover{color:var(--ink)!important;background:var(--panel)!important}
 .nav{overflow:auto;padding:4px 8px 12px;flex:1}
 .nav .sec{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--ink3);padding:12px 8px 4px}
 .nav button{display:flex;align-items:center;gap:8px;width:100%;text-align:left;border:0;background:none;padding:6px 8px;border-radius:7px;cursor:pointer;color:var(--ink)}

@@ -414,6 +414,63 @@ async function test(name, fn) {
     assert.deepStrictEqual(p.errors, []); assert.deepStrictEqual(p2.errors, []);
   });
 
+  await test('A21 chat reads notes that are NOT organized yet: all notes, full text, newest first; works for "find bugs" and "what\'s in 1?"', async () => {
+    const p = await page();
+    const texts = ['first note: buy milk and fix teh website menu', 'second: CEO meeting on Monday, ask about salary', 'third: ମୁଁ ଭଲ ଅଛି gym every morning', 'fourth: idea for a tool that sorts notes'];
+    for (let k = 0; k < 4; k++) await paste(p, String(k + 1), texts[k]);
+    assert.ok(await p.evaluate(() => MD.state.notes.every((n) => n.status === 'new')), 'nothing organized');
+    await p.click('[data-act=nav][data-v=chat]');
+    assert.ok(await p.isChecked('#set-chatAll'), 'Read all my notes is on by default');
+    for (const msg of ['find bugs in my notes', "what's in 1?"]) {
+      await p.evaluate(() => { window.__calls.length = 0; });
+      await p.fill('#chatIn', msg); await p.click('[data-act=sendChat]'); await waitRunEnd(p);
+      const inp = (await calls(p))[0].input;
+      for (const t of texts) assert.ok(inp.includes(t), msg + ': missing ' + t);
+      assert.ok(inp.indexOf(texts[3]) < inp.indexOf(texts[0]), 'newest first');
+      assert.ok(/not organized yet/.test(inp));
+    }
+    // off: only the overview and what the message names
+    await p.uncheck('#set-chatAll');
+    await p.evaluate(() => { window.__calls.length = 0; });
+    await p.fill('#chatIn', 'what is in note 2?'); await p.click('[data-act=sendChat]'); await waitRunEnd(p);
+    const inp = (await calls(p))[0].input;
+    assert.ok(inp.includes(texts[1]) && !inp.includes(texts[2]), 'only the named note');
+    assert.deepStrictEqual(p.errors, []);
+  });
+
+  await test('A22 read-all keeps the request under Claude\'s limit: long notes are cut and said so, older notes left out are named', async () => {
+    const p = await page();
+    await p.evaluate(() => {
+      const S = MD.state; const now = Date.now();
+      for (let k = 0; k < 12; k++) S.notes.push({ id: 'big' + k, name: 'Big ' + k, text: k === 11 ? 'long plain note '.repeat(4000) : ('ନୋଟ୍ ' + k + ' ').repeat(4000) + 'END' + k, addedAt: now - (12 - k) * 1000, source: 'paste', status: 'new' });
+      MD.save(); MD.render();
+    });
+    await p.click('[data-act=nav][data-v=chat]');
+    await p.fill('#chatIn', 'summarize everything'); await p.click('[data-act=sendChat]'); await waitRunEnd(p);
+    const inp = (await calls(p))[0].input;
+    const bytes = Buffer.byteLength(inp, 'utf8');
+    assert.ok(bytes < 200000, 'request size ' + bytes);
+    assert.ok(/cut: only the first 40,000/.test(inp) && /NOT INCLUDED/.test(inp) && /"Big 0"/.test(inp.slice(inp.indexOf('NOT INCLUDED'))), 'cut and left-out notes are named');
+    assert.ok(inp.includes('NOTE [big11]'), 'newest note is in');
+    assert.deepStrictEqual(p.errors, []);
+  });
+
+  await test('A23 note names that are numbers are found: "note 1", "tab 1", "#1", "in 1", "first note", "note one"', async () => {
+    const p = await page();
+    const r = await p.evaluate(() => ['what is in note 1', 'show tab 1', 'check #1', "what's in 1?", 'read the first note', 'note one please', 'the 1st note', 'I paid 1.5 lakh', 'buy 1 kg rice', 'note 12'].map((m) => MDCore.noteNamed('1', m.toLowerCase())));
+    assert.deepStrictEqual(r, [true, true, true, true, true, true, true, false, false, false]);
+    assert.ok(await p.evaluate(() => MDCore.noteNamed('Notepad tab 3', 'look at notepad tab 3')));
+    assert.deepStrictEqual(p.errors, []);
+  });
+
+  await test('A24 the « button hides the menu (remembered); ☰ brings it back', async () => {
+    const p = await page();
+    await p.click('.sideclose'); assert.ok(!(await p.isVisible('.side')));
+    assert.strictEqual(await p.evaluate(() => MD.state.settings.sidebar), 'hide');
+    await p.click('.top [data-act=toggleSide]'); assert.ok(await p.isVisible('.side'));
+    assert.deepStrictEqual(p.errors, []);
+  });
+
   await browser.close();
   const ok = results.filter((r) => r.ok).length;
   console.log(`\n${ok}/${results.length} passed`);
