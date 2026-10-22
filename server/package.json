@@ -1,0 +1,10 @@
+{
+  "name": "mind-desk-cloud",
+  "version": "1.3.0",
+  "private": true,
+  "description": "Mind Desk on your own server: login with a two-step code, notes on the server, quick capture from the phone, optional Claude/ChatGPT API with a monthly limit.",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" },
+  "license": "UNLICENSED"
+}

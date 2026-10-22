@@ -432,7 +432,7 @@
     const ctrl = new AbortController(); RUN.ctrl = ctrl; RUN.lastCost = 0;
     try {
       const r = await PLAT.aiChat(user ? system + '\n\n' + user : system, {
-        careful, signal: ctrl.signal,
+        careful, signal: ctrl.signal, vendor: S.settings.apiVendor, model: apiModel(careful ? 'careful' : 'fast'),
         onText: (text) => { liveUpdate('', text); if (RUN.onText) { try { RUN.onText(text); } catch (e) { /* ignore */ } } },
       });
       RUN.lastModel = r.model || null; RUN.lastCost = r.cost || 0; if (r.month != null) UI.monthCost = r.month;
@@ -856,7 +856,7 @@
   /* ================= export / import ================= */
   function exportObj() {
     const o = JSON.parse(JSON.stringify(S)); o.exportedAt = Date.now(); o.version = VERSION;
-    delete o.folderFiles; delete o.folderOriginals; delete o.rev; delete o.runLog; if (o.settings) delete o.settings.oaKey; // never put the API key in a backup
+    delete o.folderFiles; delete o.folderOriginals; delete o.rev; delete o.runLog; delete o.sentToClaude; // roundTrip stays: the artifact passes it back so the cloud can match its answer if (o.settings) delete o.settings.oaKey; // never put the API key in a backup
     return o;
   }
   function download(name, text, type) {
@@ -950,7 +950,7 @@
     else if (v === 'survey') el.innerHTML = viewSurvey();
     else if (v === 'todo') el.innerHTML = viewTodo();
     else if (v === 'words') el.innerHTML = viewWords();
-    else if (v === 'settings') el.innerHTML = viewSettings();
+    else if (v === 'settings') { el.innerHTML = viewSettings(); if (CLOUD && S.settings.provider === 'api') loadApiBox(); }
     else if (v.startsWith('cat:')) el.innerHTML = cat(v.slice(4)) ? viewCategory(v.slice(4)) : '<div class="empty">This category no longer exists.</div>';
     if (UI.focus) { const f = $(`[data-item="${CSS.escape(UI.focus)}"]`); if (f) { f.scrollIntoView({ block: 'center' }); f.style.outline = '2px solid var(--accent)'; } UI.focus = null; }
   }
@@ -961,7 +961,7 @@
     if (!notes.find((n) => n.id === UI.selNote)) UI.selNote = notes[0] ? notes[0].id : null;
     const list = notes.map((n) => `<div class="noteitem${n.id === UI.selNote ? ' on' : ''}" data-act="selNote" data-id="${esc(n.id)}">
         <div class="nm">${esc(n.name)}</div><div class="sub">${NOTE_CHIP[noteStatus(n)]}<span>${esc(C.fmtDate(n.addedAt))}</span></div></div>`).join('');
-    const tools = `<div class="tools"><button class="btn" data-act="addFiles">＋ Add files</button><button class="btn" data-act="pasteNote">📋 Paste a note</button></div>`;
+    const tools = `<div class="tools"><button class="btn" data-act="addFiles">＋ Add files</button><button class="btn" data-act="pasteNote">📋 Paste a note</button>${CLOUD ? '<button class="btn" data-act="sendToClaude" title="Organize free with your Claude plan: download a file for the Mind Desk artifact">📤 Send to Claude</button><button class="btn" data-act="bringBack" title="Merge the file downloaded from the Mind Desk artifact">📥 Bring back</button>' : ''}</div>`;
     const n = S.notes.find((x) => x.id === UI.selNote);
     let mid, right;
     if (!n) {
@@ -1530,6 +1530,30 @@
       };
     },
     clearInstruction(el) { const n = S.notes.find((x) => x.id === el.dataset.id); if (n) { delete n.instruction; save(); renderContent(); } },
+    sendToClaude() { sendToClaude(); },
+    bringBack() { if (busy()) return; $('#mergeInput').click(); },
+    async saveApiKey(el) {
+      const inp = $('#apiKeyIn'); const key = inp ? inp.value.trim() : ''; if (!key) { toast('Paste the key first.'); return; }
+      try { await PLAT.saveAiSettings({ vendor: el.dataset.v, key }); inp.value = ''; toast('Key saved on your server.'); loadApiBox(); } catch (e) { showError(e); }
+    },
+    async removeApiKey(el) {
+      if (!(await ask('Remove the saved API key from your server?', { okText: 'Remove', danger: true }))) return;
+      try { await PLAT.saveAiSettings({ vendor: el.dataset.v, key: '' }); toast('Key removed.'); loadApiBox(); } catch (e) { showError(e); }
+    },
+    async saveApiLimit() {
+      const v = Number(($('#apiLimitIn') || {}).value); if (!(v >= 0)) { toast('Type a number, for example 5.'); return; }
+      try { await PLAT.saveAiSettings({ limitUsd: v }); toast('Monthly limit saved.'); loadApiBox(); } catch (e) { showError(e); }
+    },
+    async changePassword() {
+      const oldPw = ($('#pwOld') || {}).value || ''; const newPw = ($('#pwNew') || {}).value || '';
+      if (newPw.length < 12) { toast('The new password needs 12 characters or more.'); return; }
+      try { await PLAT.changePassword({ old: oldPw, password: newPw }); $('#pwOld').value = ''; $('#pwNew').value = ''; toast('Password changed. Other devices were logged out.', 6000); } catch (e) { showError(e); }
+    },
+    async logout() {
+      if (saveState !== 'saved') { clearTimeout(saveTimer); await writeState(); }
+      try { await PLAT.logout(); } catch (e) { /* go to the login page anyway */ }
+      location.href = '/login';
+    },
     newChat() { UI.chatId = 'new'; UI.chatDraft = ''; renderContent(); const t = $('#chatIn'); if (t) t.focus(); },
     openChat(el, e) { if (e && e.target.closest('[data-act=delChat]')) return; UI.chatId = el.dataset.id; renderContent(); },
     async delChat(el, e) {
@@ -1758,6 +1782,8 @@
         if (k === 'provider') { UI.connResult = ''; renderContent(); }
         if (k === 'theme') applyTheme();
         if (k === 'claudeFast' || k === 'claudeCareful') { UI.modelWarned = false; paintTop(); }
+        if (k === 'apiVendor' || k === 'apiFast' || k === 'apiCareful') { if (k === 'apiVendor') { S.settings.apiFast = ''; S.settings.apiCareful = ''; save(); } UI.connResult = ''; renderContent(); paintTop(); }
+        if (k === 'provider') paintTop();
         if (k === 'model' || k === 'ollamaUrl' || k === 'oaUrl') { UI.connResult = ''; renderContent(); }
         return;
       }
@@ -1778,6 +1804,7 @@
       if (el.dataset.prompt) { const k = el.dataset.prompt; const v = el.value; S.prompts[k] = v.trim() && v.trim() !== C.DEFAULT_PROMPTS[k].trim() ? v : null; save(); return; }
       if (el.id === 'fileInput') { if (el.files.length) addFiles([...el.files]); el.value = ''; return; }
       if (el.id === 'importInput') { if (el.files[0]) importFile(el.files[0]); el.value = ''; }
+      if (el.id === 'mergeInput') { if (el.files[0]) mergeFile(el.files[0]); el.value = ''; }
     });
     document.addEventListener('input', (e) => {
       if (e.target.id === 'search') { UI.search = e.target.value; renderContent(); return; }
@@ -1805,8 +1832,9 @@
       const problem = C.backupProblem(o);
       if (problem) throw new Error('This backup cannot be restored. Nothing was changed.\n\n' + problem);
       if (RUN.active) throw new Error('Please wait until the AI run has finished.');
-      if (!(await ask(`Restore this backup from ${o.exportedAt ? fmtTime(o.exportedAt) : 'an unknown date'}?\nIt REPLACES everything in Mind Desk now (${o.notes.length} notes, ${o.items.length} items).\n${ART ? 'Your notes stay private in this artifact.' : 'Your AI connection settings on this PC stay as they are.'}`, { okText: 'Restore', danger: true }))) return;
+      if (!(await ask(`Restore this backup from ${o.exportedAt ? fmtTime(o.exportedAt) : 'an unknown date'}?\nIt REPLACES everything in Mind Desk now (${o.notes.length} notes, ${o.items.length} items).\n${ART ? 'Your notes stay private in this artifact.' : CLOUD ? 'Your AI settings stay as they are. The server keeps a copy of what is here now.' : 'Your AI connection settings on this PC stay as they are.'}`, { okText: 'Restore', danger: true }))) return;
       if (RUN.active) throw new Error('Please wait until the AI run has finished.');
+      if (CLOUD) { try { await PLAT.backupNow('before restore'); } catch (e) { throw new Error('The server could not make a safety copy, so nothing was restored: ' + e.message); } }
       const keep = {}; for (const k of CONNECTION) keep[k] = S.settings[k];
       const next = migrate(o); Object.assign(next.settings, keep);
       delete next.exportedAt; delete next.version; next.folderFiles = []; next.folderOriginals = [];
@@ -1824,7 +1852,8 @@
   }
   function fatal(title, msg) {
     screen(`<h2>${esc(title)}</h2><p class="pre">${esc(msg)}</p><p class="hint">Your notes have not been touched. Close other Mind Desk windows, then try again. If this keeps happening, restart the browser or the PC.</p>
-      <div class="actions"><button class="btn primary" onclick="location.reload()">Try again</button></div>`, 'data-fatal');
+      <div class="actions"><button class="btn primary" id="fatalRetry">Try again</button></div>`, 'data-fatal');
+    const b = $('#fatalRetry'); if (b) b.addEventListener('click', () => location.reload()); // no inline handler (the cloud page has a strict security policy)
   }
   /** another window is in charge (or saved newer data): stop writing, offer to take over */
   function blockWindow(reason) {
@@ -1880,9 +1909,66 @@
     if (!wired) { wire(); wired = true; }
     if (await loadState()) { await initFolder(); paintSaveState(); }
   }
+  /* ---------- cloud: quick captures and the round trip with the Claude artifact ---------- */
+  let pulling = false;
+  /** ideas saved on the phone's capture page wait on the server; they become Inbox notes here, then the server forgets them */
+  async function pullCaptures() {
+    if (!CLOUD || pulling || !LIFE.ok || LIFE.blocked) return;
+    pulling = true;
+    try {
+      const list = (await PLAT.takeCaptures()).captures || []; if (!list.length) return;
+      let added = 0;
+      for (const c of list) {
+        if (S.notes.some((n) => n.captureId === c.id)) continue; // already here (an earlier pull saved but did not tell the server)
+        const r = addNote(c.name || 'Idea ' + fmtTime(c.at), c.text, 'capture');
+        if (r && r !== 'dup') { r.addedAt = c.at || r.addedAt; r.captureId = c.id; added++; }
+      }
+      clearTimeout(saveTimer); await writeState();
+      if (saveState !== 'saved') return; // keep them on the server until they are safely saved here
+      await PLAT.ackCaptures(list.map((c) => c.id));
+      if (added) { render(); toast(`${added} new idea(s) from quick capture are in your Inbox.`); }
+    } catch (e) { /* try again at the next check */ } finally { pulling = false; }
+  }
+  /** 📤 a file for the Mind Desk artifact; remembers what everything looked like, so the answer can be merged */
+  function sendToClaude() {
+    if (busy()) return;
+    const id = C.uid('rt'); const at = Date.now();
+    const o = exportObj(); o.roundTrip = { id, at, from: 'cloud' };
+    S.sentToClaude = { id, at, base: C.roundTripBase(S) }; save();
+    download(`mind-desk-for-claude-${today()}.json`, JSON.stringify(o, null, 1), 'application/json');
+    toast('File downloaded. In the Mind Desk artifact: Settings → Restore from backup…', 8000);
+    if (UI.view === 'settings') renderContent();
+  }
+  async function mergeFile(f) {
+    try {
+      let o; try { o = JSON.parse(await f.text()); } catch (e) { throw new Error('This file cannot be read. Choose the backup you downloaded in the Mind Desk artifact.'); }
+      const problem = C.backupProblem(o);
+      if (problem) throw new Error('This file cannot be used. Nothing was changed.\n\n' + problem);
+      if (RUN.active) throw new Error('Please wait until the AI run has finished.');
+      const sent = S.sentToClaude; const match = sent && o.roundTrip && o.roundTrip.id === sent.id;
+      if (!match && !(await ask(sent ? 'This file does not come from your last “Send to Claude” (' + fmtTime(sent.at) + '). Merge it anyway? Everything here is kept; new things from the file are added, and where both changed, the newer one is used.' : 'You have not used “Send to Claude” yet. Merge this file anyway? Everything here is kept; new things from the file are added.', { okText: 'Merge anyway' }))) return;
+      const m = C.mergeRoundTrip(S, migrate(o), match ? sent.base : null);
+      const a = m.summary.added; const u = m.summary.updated; const kept = m.summary.keptHere;
+      const lines = [];
+      if (a.items) lines.push(`${a.items} new organized item(s)`); if (u.items) lines.push(`${u.items} item(s) updated`);
+      if (a.tasks) lines.push(`${a.tasks} new task(s)`); if (u.notes) lines.push(`${u.notes} note(s) updated`);
+      if (a.memory || u.memory) lines.push(`${(a.memory || 0) + (u.memory || 0)} Memory change(s)`); if (a.words || u.words) lines.push(`${(a.words || 0) + (u.words || 0)} word change(s)`);
+      if (a.chats || u.chats) lines.push(`${(a.chats || 0) + (u.chats || 0)} chat(s)`);
+      if (m.summary.removed.items) lines.push(`${m.summary.removed.items} old item(s) replaced`);
+      if (kept.notes) lines.push(`${kept.notes} idea(s) you added here since sending are kept`);
+      if (m.summary.conflicts) lines.push(`${m.summary.conflicts} thing(s) changed on both sides (the newer one is used)`);
+      if (!(await ask('Bring back from Claude:\n• ' + (lines.length ? lines.join('\n• ') : 'nothing new') + '\n\nThe server keeps a copy of what is here now.', { okText: 'Merge' }))) return;
+      if (RUN.active) throw new Error('Please wait until the AI run has finished.');
+      try { await PLAT.backupNow('before bring back'); } catch (e) { throw new Error('The server could not make a safety copy, so nothing was merged: ' + e.message); }
+      const settings = S.settings; S = migrate(m.state); S.settings = settings; S.sentToClaude = null; delete S.roundTrip;
+      const review = S.items.filter((i) => i.status === 'review').length;
+      UI.view = review ? 'review' : 'inbox'; UI.editing = null; save(); render();
+      toast(review ? `Merged. ${review} item(s) wait for your review.` : 'Merged.', 6000);
+    } catch (e) { showError(e); }
+  }
   async function loadState() {
     let raw;
-    try { raw = await store.get('state'); } catch (e) { LIFE.ok = false; fatal('Could not read your saved notes', 'The browser storage did not answer (' + ((e && e.message) || e) + ').'); return false; }
+    try { raw = await store.get('state'); } catch (e) { LIFE.ok = false; fatal('Could not read your saved notes', (CLOUD ? 'Your server did not answer (' : 'The browser storage did not answer (') + ((e && e.message) || e) + ').'); return false; }
     S = migrate(raw); LIFE.rev = (raw && raw.rev) || 0; LIFE.ok = true; RUN.stop = false;
     UI.editing = null; UI.dirty = false; UI.draft = null;
     applyTheme(); render(); checkRecovery();
@@ -1897,6 +1983,7 @@
       // another device or tab saved newer notes: stop saving here (the same protection as two windows on the PC)
       PLAT.onRemoteChange = () => { if (LIFE.ok && !LIFE.blocked) blockWindow('changed'); };
       PLAT.knownRev = () => LIFE.rev;
+      if (CLOUD) PLAT.onCaptures = pullCaptures;
     }
     await store.open();
     if (store.failed) { fatal('Could not open your saved notes', 'The browser storage could not be opened (' + store.failed + ').'); return; }
@@ -1906,6 +1993,7 @@
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
     await initFolder(); paintSaveState();
     window.addEventListener('focus', checkRecovery);
+    if (CLOUD) { PLAT.startPolling(); pullCaptures(); }
   }
   start();
 })();

@@ -61,7 +61,7 @@
   /* ---------- AI through the server (API key never reaches the browser) ---------- */
   /** streams the answer; resolves {text, model, cost, truncated}; rejects with {code, message} */
   P.aiChat = async function aiChat(prompt, opts) {
-    const r = await api('POST', '/api/ai', { prompt, careful: !!opts.careful }, { raw: true, signal: opts.signal });
+    const r = await api('POST', '/api/ai', { prompt, vendor: opts.vendor, model: opts.model, careful: !!opts.careful }, { raw: true, signal: opts.signal });
     if (!r.ok) {
       let j = null; try { j = await r.json(); } catch (e) { /* ignore */ }
       throw { code: (j && j.code) || 'server_error', message: (j && j.error) || ('The server answered ' + r.status) };

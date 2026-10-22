@@ -225,6 +225,7 @@ details.think .pre{font-size:13px;color:var(--ink2);margin-top:6px;max-height:32
 <div class="drop" id="drop">Drop your notes here</div>
 <input type="file" id="fileInput" multiple accept=".txt,.md,.markdown,.text,.log,text/plain" hidden>
 <input type="file" id="importInput" accept=".json,application/json" hidden>
+<input type="file" id="mergeInput" accept=".json,application/json" hidden>
 <noscript><p style="padding:20px">Mind Desk needs JavaScript. Please open it in Microsoft Edge or Google Chrome.</p></noscript>
 <script>
 /* Mind Desk core: pure functions (no DOM). Exposed as window.MDCore for tests. */
@@ -1176,7 +1177,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
 (() => {
   'use strict';
   const C = window.MDCore;
-  const VERSION = "1.2.2";
+  const VERSION = "1.3.0";
   /* Two builds from one source: "pc" (mind-desk.html, a file on the PC with Ollama) and
      "artifact" (mind-desk-artifact.html, published on claude.ai: Claude answers, notes live in the artifact's private storage). */
   const TARGET = "pc";
@@ -1606,7 +1607,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     const ctrl = new AbortController(); RUN.ctrl = ctrl; RUN.lastCost = 0;
     try {
       const r = await PLAT.aiChat(user ? system + '\n\n' + user : system, {
-        careful, signal: ctrl.signal,
+        careful, signal: ctrl.signal, vendor: S.settings.apiVendor, model: apiModel(careful ? 'careful' : 'fast'),
         onText: (text) => { liveUpdate('', text); if (RUN.onText) { try { RUN.onText(text); } catch (e) { /* ignore */ } } },
       });
       RUN.lastModel = r.model || null; RUN.lastCost = r.cost || 0; if (r.month != null) UI.monthCost = r.month;
@@ -2030,7 +2031,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
   /* ================= export / import ================= */
   function exportObj() {
     const o = JSON.parse(JSON.stringify(S)); o.exportedAt = Date.now(); o.version = VERSION;
-    delete o.folderFiles; delete o.folderOriginals; delete o.rev; delete o.runLog; if (o.settings) delete o.settings.oaKey; // never put the API key in a backup
+    delete o.folderFiles; delete o.folderOriginals; delete o.rev; delete o.runLog; delete o.sentToClaude; // roundTrip stays: the artifact passes it back so the cloud can match its answer if (o.settings) delete o.settings.oaKey; // never put the API key in a backup
     return o;
   }
   function download(name, text, type) {
@@ -2124,7 +2125,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     else if (v === 'survey') el.innerHTML = viewSurvey();
     else if (v === 'todo') el.innerHTML = viewTodo();
     else if (v === 'words') el.innerHTML = viewWords();
-    else if (v === 'settings') el.innerHTML = viewSettings();
+    else if (v === 'settings') { el.innerHTML = viewSettings(); if (CLOUD && S.settings.provider === 'api') loadApiBox(); }
     else if (v.startsWith('cat:')) el.innerHTML = cat(v.slice(4)) ? viewCategory(v.slice(4)) : '<div class="empty">This category no longer exists.</div>';
     if (UI.focus) { const f = $(`[data-item="${CSS.escape(UI.focus)}"]`); if (f) { f.scrollIntoView({ block: 'center' }); f.style.outline = '2px solid var(--accent)'; } UI.focus = null; }
   }
@@ -2135,7 +2136,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     if (!notes.find((n) => n.id === UI.selNote)) UI.selNote = notes[0] ? notes[0].id : null;
     const list = notes.map((n) => `<div class="noteitem${n.id === UI.selNote ? ' on' : ''}" data-act="selNote" data-id="${esc(n.id)}">
         <div class="nm">${esc(n.name)}</div><div class="sub">${NOTE_CHIP[noteStatus(n)]}<span>${esc(C.fmtDate(n.addedAt))}</span></div></div>`).join('');
-    const tools = `<div class="tools"><button class="btn" data-act="addFiles">＋ Add files</button><button class="btn" data-act="pasteNote">📋 Paste a note</button></div>`;
+    const tools = `<div class="tools"><button class="btn" data-act="addFiles">＋ Add files</button><button class="btn" data-act="pasteNote">📋 Paste a note</button>${CLOUD ? '<button class="btn" data-act="sendToClaude" title="Organize free with your Claude plan: download a file for the Mind Desk artifact">📤 Send to Claude</button><button class="btn" data-act="bringBack" title="Merge the file downloaded from the Mind Desk artifact">📥 Bring back</button>' : ''}</div>`;
     const n = S.notes.find((x) => x.id === UI.selNote);
     let mid, right;
     if (!n) {
@@ -2375,8 +2376,11 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     const radio = (v, label) => `<label style="display:block;margin-bottom:4px"><input type="radio" name="prov" data-set="provider" value="${v}" ${p === v ? 'checked' : ''}> ${label}</label>`;
     let ai = ART ? `<div class="box"><h2>AI: Claude</h2>
       <p class="hint">Mind Desk asks Claude with your own Claude plan, so there is nothing to set up and no extra cost beyond your plan’s usage. The first time, Claude asks you to allow it. Your notes go to Claude only when you press a button (Organize, Ask AI again, Fix my typing, Chat).</p>
-      <div class="row"><button class="btn" data-act="testAI">Try a quick test note</button></div><div id="connResult" style="margin-top:10px">${UI.connResult}</div></div>` : `<div class="box"><h2>AI connection</h2>${radio('ollama', '<b>Ollama</b> on this PC (private and free) — recommended')}${radio('manual', '<b>Copy &amp; paste</b> with ChatGPT or Claude (no setup; your notes leave your PC)')}${radio('openai', '<b>Other local AI</b> with an OpenAI-style API (AnythingLLM, LM Studio…)')}<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">`;
-    if (ART) { /* Claude only */ } else if (p === 'ollama') {
+      <div class="row"><button class="btn" data-act="testAI">Try a quick test note</button></div><div id="connResult" style="margin-top:10px">${UI.connResult}</div></div>` : `<div class="box"><h2>AI connection</h2>${CLOUD ? radio('api', '<b>Claude or ChatGPT with your own API key</b> (paid per use, with a monthly limit; works on every device)') : ''}${radio('ollama', '<b>Ollama</b> on this PC (private and free) — recommended')}${radio('manual', '<b>Copy &amp; paste</b> with ChatGPT or Claude (no setup; your notes leave your PC)')}${radio('openai', '<b>Other local AI</b> with an OpenAI-style API (AnythingLLM, LM Studio…)')}<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">`;
+    if (ART) { /* Claude only */ } else if (p === 'api') {
+      ai += apiBoxHtml();
+    } else if (p === 'ollama') {
+      if (CLOUD) ai += '<p class="hint">Ollama answers only when you open Mind Desk on the PC where Ollama runs. Set <code>OLLAMA_ORIGINS</code> to this site’s address (for example <code>https://mind.yourdomain.com</code>) instead of <code>*</code>.</p>';
       ai += `<div class="grid2">${sField('ollamaUrl', 'Ollama address')}<div class="field"><label for="set-model">Model</label><input type="text" id="set-model" data-set="model" value="${esc(s.model)}" list="modelList"><datalist id="modelList"></datalist></div></div>
         <div class="row"><button class="btn" data-act="testConn">Test connection</button><button class="btn" data-act="testAI">Try a quick test note</button></div>
         <div id="connResult" style="margin-top:10px">${UI.connResult}</div>
@@ -2389,7 +2393,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     } else {
       ai += `<p class="hint">Mind Desk shows you a prompt to copy into ChatGPT or Claude, and you paste the answer back. Three short rounds: split, questions, organize.</p>${sField('manualBatch', 'Notes per prompt in the organize step', 'number', 'min="1" max="100"')}`;
     }
-    const warns = ART ? [] : remoteWarning();
+    const warns = ART || p === 'api' ? [] : remoteWarning();
     if (warns.length) ai += warns.map((w) => `<div class="banner${/Copy & paste/.test(w) ? ' info' : ' bad'}" style="margin-top:12px">${esc(w)}</div>`).join('');
     if (!ART) ai += '</div>';
     const mOpt = (key) => `<option value="auto"${s[key] === 'auto' ? ' selected' : ''}>Automatic (${key === 'claudeFast' ? 'quick model, usually Haiku' : 'main model, usually Sonnet'})</option>` + CLAUDE_MODELS.map((m) => `<option value="${m.id}"${s[key] === m.id ? ' selected' : ''}>${esc(m.name)} — ${esc(m.note)}</option>`).join('');
@@ -2400,7 +2404,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
       <div class="field" style="max-width:420px"><label for="set-claudeEffort">How hard Careful thinks (with a chosen model)</label><select id="set-claudeEffort" data-set="claudeEffort">
         ${[['auto', 'Normal'], ['low', 'Low (faster)'], ['medium', 'Medium'], ['high', 'High (slowest, most thorough)']].map(([v, l]) => `<option value="${v}"${s.claudeEffort === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div>
       <p class="muted small">A chosen model in ⚡ Fast thinks only a little, to stay quick. Claude’s thinking is not shown here.</p></div>`
-      : s.provider === 'manual' ? '' : `<div class="box"><h2>Fast or Careful</h2>
+      : s.provider === 'manual' || s.provider === 'api' ? '' : `<div class="box"><h2>Fast or Careful</h2>
       <p class="hint">Choose next to <b>✨ Organize all</b> each time. <b>⚡ Fast</b>: quick answers, no thinking. <b>🧠 Careful</b>: the AI thinks first. Slower (often 2–3 times), but better at understanding what you meant. The thinking is saved and folded away under <b>Show AI’s thinking</b>.</p>
       <p style="margin:8px 0 4px">In Careful mode, let the AI think in:</p>
       <div class="row">${sField('thinkSplit', 'Step 1: splitting notes', 'checkbox')}${sField('thinkSurvey', 'Step 2: questions', 'checkbox')}${sField('thinkOrganize', 'Step 3: organizing (typos, category, tasks)', 'checkbox')}</div>
@@ -2414,7 +2418,52 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     const survey = `<div class="box"><h2>Questions before organizing</h2>${sField('survey', 'Let the AI ask me about words and notes it does not understand', 'checkbox')}<div style="max-width:220px;margin-top:8px">${sField('surveyMax', 'Maximum questions per run', 'number', 'min="1" max="20"')}</div></div>`;
     return ai + mode + writing + survey + reportBox() + catEditor() + promptEditor() + storageBox() + (ART ? '' : `<div class="box"><h2>Look</h2><div class="field" style="max-width:220px"><label for="set-theme">Theme</label>
       <select id="set-theme" data-set="theme"><option value="auto"${s.theme === 'auto' ? ' selected' : ''}>Same as Windows</option><option value="light"${s.theme === 'light' ? ' selected' : ''}>Light</option><option value="dark"${s.theme === 'dark' ? ' selected' : ''}>Dark</option></select></div></div>`) + `
-      <div class="box"><h2>Danger zone</h2><button class="btn danger" data-act="deleteAll">Delete everything in Mind Desk</button><p class="muted small">Mind Desk ${esc(VERSION)}${ART ? ' (Claude artifact)' : ''}</p></div>`;
+      <div class="box"><h2>Danger zone</h2><button class="btn danger" data-act="deleteAll">Delete everything in Mind Desk</button><p class="muted small">Mind Desk ${esc(VERSION)}${ART ? ' (Claude artifact)' : CLOUD ? ' (cloud)' : ''}</p></div>`;
+  }
+  /** cloud: your API key, the models for Fast and Careful, and the monthly limit (key and spending live on the server) */
+  function apiBoxHtml() {
+    const s = S.settings; const list = API_MODELS[s.apiVendor] || [];
+    const price = (m) => `$${m.price[0]} in / $${m.price[1]} out per million tokens`;
+    const opts = (mode) => list.map((m) => `<option value="${esc(m.id)}"${apiModel(mode) === m.id ? ' selected' : ''}>${esc(m.name)} — ${esc(m.note)}</option>`).join('');
+    const cur = (mode) => list.find((m) => m.id === apiModel(mode));
+    return `<div class="grid2"><div class="field"><label for="set-apiVendor">Service</label><select id="set-apiVendor" data-set="apiVendor">
+        <option value="anthropic"${s.apiVendor === 'anthropic' ? ' selected' : ''}>Claude (Anthropic API)</option><option value="openai"${s.apiVendor === 'openai' ? ' selected' : ''}>ChatGPT (OpenAI API)</option></select></div></div>
+      <div class="grid2"><div class="field"><label for="set-apiFast">⚡ Fast uses</label><select id="set-apiFast" data-set="apiFast">${opts('fast')}</select><span class="muted small">${esc(price(cur('fast')))}</span></div>
+        <div class="field"><label for="set-apiCareful">🧠 Careful uses</label><select id="set-apiCareful" data-set="apiCareful">${opts('careful')}</select><span class="muted small">${esc(price(cur('careful')))}</span></div></div>
+      <div id="apiServer" class="acard" style="margin:4px 0 12px">Loading your key and spending…</div>
+      <div class="row"><button class="btn" data-act="testAI">Try a quick test note</button></div><div id="connResult" style="margin-top:10px">${UI.connResult}</div>
+      <p class="muted small">Your notes go to ${s.apiVendor === 'openai' ? 'OpenAI' : 'Anthropic'} only when you press a button. The key is kept on your server: it never comes back to the browser and is never in a backup. This is paid per use, separate from a ChatGPT or Claude subscription. Prices checked 22 Oct 2026.</p>`;
+  }
+  async function loadApiBox() {
+    const el = $('#apiServer'); if (!el || !CLOUD) return;
+    let a; try { a = await PLAT.aiSettings(); } catch (e) { el.innerHTML = `<span style="color:var(--bad)">${esc(e.message)}</span>`; return; }
+    UI.monthCost = a.month.usd;
+    const v = S.settings.apiVendor; const k = a.keys[v] || {};
+    const el2 = $('#apiServer'); if (!el2) return;
+    el2.innerHTML = `<div class="field"><label for="apiKeyIn">${v === 'openai' ? 'OpenAI' : 'Anthropic'} API key</label>
+        ${k.set ? `<div class="row"><span class="chip good">saved (…${esc(k.last4)})</span><button class="btn small" data-act="removeApiKey" data-v="${esc(v)}">Remove</button></div>` : ''}
+        <div class="row"><input type="password" id="apiKeyIn" autocomplete="off" placeholder="${k.set ? 'Paste a new key to replace it' : 'Paste your key (starts with ' + (v === 'openai' ? 'sk-' : 'sk-ant-') + ')'}" style="flex:1;min-width:220px"><button class="btn small primary" data-act="saveApiKey" data-v="${esc(v)}">Save key</button></div></div>
+      <div class="row"><span>This month: <b>${esc(fmtCost(a.month.usd))}</b> of <b>$${esc(String(a.limitUsd))}</b> (${a.month.requests} request${a.month.requests === 1 ? '' : 's'})</span></div>
+      <div class="row" style="margin-top:6px"><label for="apiLimitIn">Monthly limit (US$)</label><input type="number" id="apiLimitIn" min="0" step="1" value="${esc(String(a.limitUsd))}" style="width:90px"><button class="btn small" data-act="saveApiLimit">Save limit</button><span class="muted small">Mind Desk stops when the month reaches it.</span></div>`;
+  }
+  /** cloud: send everything to the Claude artifact and merge the organized result back */
+  function roundTripBox() {
+    const st = S.sentToClaude;
+    return `<div class="box"><h2>Organize free with Claude (round trip)</h2>
+      <p class="hint">Uses your Claude plan instead of an API key. Your notes stay here; the artifact only works on a copy.</p>
+      <ol class="steps"><li><b>📤 Send to Claude</b> downloads a file with all your notes, Memory, words and categories.</li>
+        <li>Open the <b>Mind Desk artifact</b> on claude.ai → Settings → <b>Restore from backup…</b> → choose that file → <b>✨ Organize all</b> (and chat, review, as you like).</li>
+        <li>In the artifact: Settings → <b>Download backup</b>.</li>
+        <li>Here: <b>📥 Bring back from Claude</b> → choose that file. Ideas you captured here in the meantime are kept.</li></ol>
+      ${st ? `<p class="muted small">Last sent: ${esc(fmtTime(st.at))}.</p>` : ''}
+      <div class="row"><button class="btn primary" data-act="sendToClaude">📤 Send to Claude</button><button class="btn" data-act="bringBack">📥 Bring back from Claude</button></div></div>`;
+  }
+  function accountBox() {
+    const a = (PLAT && PLAT.account) || {};
+    return `<div class="box"><h2>Login</h2><p class="hint">Logged in${a.user ? ' as <b>' + esc(a.user) + '</b>' : ''}. Two-step code: ${a.totp ? '<span class="chip good">on</span>' : '<span class="chip warn">off</span>'}${a.recoveryLeft != null ? ` · ${a.recoveryLeft} recovery code(s) left` : ''}.</p>
+      <div class="grid2"><div class="field"><label for="pwOld">Current password</label><input type="password" id="pwOld" autocomplete="current-password"></div>
+        <div class="field"><label for="pwNew">New password (12 characters or more)</label><input type="password" id="pwNew" autocomplete="new-password"></div></div>
+      <div class="row"><button class="btn" data-act="changePassword">Change password</button><button class="btn" data-act="logout">Log out</button></div></div>`;
   }
   function ollamaHelp() {
     return `<ol class="steps">
@@ -2459,6 +2508,10 @@ if (typeof module !== 'undefined') module.exports = MDCore;
       <div class="row"><button class="btn" data-act="report" data-scope="review">Report: items waiting for review</button><button class="btn" data-act="report" data-scope="all">Report: all notes</button></div></div>`;
   }
   function storageBox() {
+    if (CLOUD) {
+      return roundTripBox() + `<div class="box"><h2>Saving &amp; backup</h2><p class="hint">Everything is saved on your server as you work, and opened from any device after you log in. The server also keeps a copy every day (the last 30 days) and one before every “Bring back” and every restore.</p>
+        <div class="row"><button class="btn" data-act="exportJSON">Download backup</button><button class="btn" data-act="importJSON">Restore from backup…</button><button class="btn" data-act="downloadMD">Download all as Markdown</button></div></div>` + accountBox();
+    }
     if (ART) {
       const where = PLAT.mode === 'db' ? 'Everything is saved automatically in this artifact’s private storage on your Claude account. Only you can see it, also if you share the artifact. Open the same artifact on your phone or another computer to see the same notes.'
         : PLAT.mode === 'local' ? `<span style="color:var(--warn)">Your notes are saved only in this browser (${esc(PLAT.reason)}). Open Mind Desk on claude.ai, signed in, to keep them in your account.</span>`
@@ -2652,6 +2705,30 @@ if (typeof module !== 'undefined') module.exports = MDCore;
       };
     },
     clearInstruction(el) { const n = S.notes.find((x) => x.id === el.dataset.id); if (n) { delete n.instruction; save(); renderContent(); } },
+    sendToClaude() { sendToClaude(); },
+    bringBack() { if (busy()) return; $('#mergeInput').click(); },
+    async saveApiKey(el) {
+      const inp = $('#apiKeyIn'); const key = inp ? inp.value.trim() : ''; if (!key) { toast('Paste the key first.'); return; }
+      try { await PLAT.saveAiSettings({ vendor: el.dataset.v, key }); inp.value = ''; toast('Key saved on your server.'); loadApiBox(); } catch (e) { showError(e); }
+    },
+    async removeApiKey(el) {
+      if (!(await ask('Remove the saved API key from your server?', { okText: 'Remove', danger: true }))) return;
+      try { await PLAT.saveAiSettings({ vendor: el.dataset.v, key: '' }); toast('Key removed.'); loadApiBox(); } catch (e) { showError(e); }
+    },
+    async saveApiLimit() {
+      const v = Number(($('#apiLimitIn') || {}).value); if (!(v >= 0)) { toast('Type a number, for example 5.'); return; }
+      try { await PLAT.saveAiSettings({ limitUsd: v }); toast('Monthly limit saved.'); loadApiBox(); } catch (e) { showError(e); }
+    },
+    async changePassword() {
+      const oldPw = ($('#pwOld') || {}).value || ''; const newPw = ($('#pwNew') || {}).value || '';
+      if (newPw.length < 12) { toast('The new password needs 12 characters or more.'); return; }
+      try { await PLAT.changePassword({ old: oldPw, password: newPw }); $('#pwOld').value = ''; $('#pwNew').value = ''; toast('Password changed. Other devices were logged out.', 6000); } catch (e) { showError(e); }
+    },
+    async logout() {
+      if (saveState !== 'saved') { clearTimeout(saveTimer); await writeState(); }
+      try { await PLAT.logout(); } catch (e) { /* go to the login page anyway */ }
+      location.href = '/login';
+    },
     newChat() { UI.chatId = 'new'; UI.chatDraft = ''; renderContent(); const t = $('#chatIn'); if (t) t.focus(); },
     openChat(el, e) { if (e && e.target.closest('[data-act=delChat]')) return; UI.chatId = el.dataset.id; renderContent(); },
     async delChat(el, e) {
@@ -2880,6 +2957,8 @@ if (typeof module !== 'undefined') module.exports = MDCore;
         if (k === 'provider') { UI.connResult = ''; renderContent(); }
         if (k === 'theme') applyTheme();
         if (k === 'claudeFast' || k === 'claudeCareful') { UI.modelWarned = false; paintTop(); }
+        if (k === 'apiVendor' || k === 'apiFast' || k === 'apiCareful') { if (k === 'apiVendor') { S.settings.apiFast = ''; S.settings.apiCareful = ''; save(); } UI.connResult = ''; renderContent(); paintTop(); }
+        if (k === 'provider') paintTop();
         if (k === 'model' || k === 'ollamaUrl' || k === 'oaUrl') { UI.connResult = ''; renderContent(); }
         return;
       }
@@ -2900,6 +2979,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
       if (el.dataset.prompt) { const k = el.dataset.prompt; const v = el.value; S.prompts[k] = v.trim() && v.trim() !== C.DEFAULT_PROMPTS[k].trim() ? v : null; save(); return; }
       if (el.id === 'fileInput') { if (el.files.length) addFiles([...el.files]); el.value = ''; return; }
       if (el.id === 'importInput') { if (el.files[0]) importFile(el.files[0]); el.value = ''; }
+      if (el.id === 'mergeInput') { if (el.files[0]) mergeFile(el.files[0]); el.value = ''; }
     });
     document.addEventListener('input', (e) => {
       if (e.target.id === 'search') { UI.search = e.target.value; renderContent(); return; }
@@ -2927,8 +3007,9 @@ if (typeof module !== 'undefined') module.exports = MDCore;
       const problem = C.backupProblem(o);
       if (problem) throw new Error('This backup cannot be restored. Nothing was changed.\n\n' + problem);
       if (RUN.active) throw new Error('Please wait until the AI run has finished.');
-      if (!(await ask(`Restore this backup from ${o.exportedAt ? fmtTime(o.exportedAt) : 'an unknown date'}?\nIt REPLACES everything in Mind Desk now (${o.notes.length} notes, ${o.items.length} items).\n${ART ? 'Your notes stay private in this artifact.' : 'Your AI connection settings on this PC stay as they are.'}`, { okText: 'Restore', danger: true }))) return;
+      if (!(await ask(`Restore this backup from ${o.exportedAt ? fmtTime(o.exportedAt) : 'an unknown date'}?\nIt REPLACES everything in Mind Desk now (${o.notes.length} notes, ${o.items.length} items).\n${ART ? 'Your notes stay private in this artifact.' : CLOUD ? 'Your AI settings stay as they are. The server keeps a copy of what is here now.' : 'Your AI connection settings on this PC stay as they are.'}`, { okText: 'Restore', danger: true }))) return;
       if (RUN.active) throw new Error('Please wait until the AI run has finished.');
+      if (CLOUD) { try { await PLAT.backupNow('before restore'); } catch (e) { throw new Error('The server could not make a safety copy, so nothing was restored: ' + e.message); } }
       const keep = {}; for (const k of CONNECTION) keep[k] = S.settings[k];
       const next = migrate(o); Object.assign(next.settings, keep);
       delete next.exportedAt; delete next.version; next.folderFiles = []; next.folderOriginals = [];
@@ -2946,7 +3027,8 @@ if (typeof module !== 'undefined') module.exports = MDCore;
   }
   function fatal(title, msg) {
     screen(`<h2>${esc(title)}</h2><p class="pre">${esc(msg)}</p><p class="hint">Your notes have not been touched. Close other Mind Desk windows, then try again. If this keeps happening, restart the browser or the PC.</p>
-      <div class="actions"><button class="btn primary" onclick="location.reload()">Try again</button></div>`, 'data-fatal');
+      <div class="actions"><button class="btn primary" id="fatalRetry">Try again</button></div>`, 'data-fatal');
+    const b = $('#fatalRetry'); if (b) b.addEventListener('click', () => location.reload()); // no inline handler (the cloud page has a strict security policy)
   }
   /** another window is in charge (or saved newer data): stop writing, offer to take over */
   function blockWindow(reason) {
@@ -3002,9 +3084,66 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     if (!wired) { wire(); wired = true; }
     if (await loadState()) { await initFolder(); paintSaveState(); }
   }
+  /* ---------- cloud: quick captures and the round trip with the Claude artifact ---------- */
+  let pulling = false;
+  /** ideas saved on the phone's capture page wait on the server; they become Inbox notes here, then the server forgets them */
+  async function pullCaptures() {
+    if (!CLOUD || pulling || !LIFE.ok || LIFE.blocked) return;
+    pulling = true;
+    try {
+      const list = (await PLAT.takeCaptures()).captures || []; if (!list.length) return;
+      let added = 0;
+      for (const c of list) {
+        if (S.notes.some((n) => n.captureId === c.id)) continue; // already here (an earlier pull saved but did not tell the server)
+        const r = addNote(c.name || 'Idea ' + fmtTime(c.at), c.text, 'capture');
+        if (r && r !== 'dup') { r.addedAt = c.at || r.addedAt; r.captureId = c.id; added++; }
+      }
+      clearTimeout(saveTimer); await writeState();
+      if (saveState !== 'saved') return; // keep them on the server until they are safely saved here
+      await PLAT.ackCaptures(list.map((c) => c.id));
+      if (added) { render(); toast(`${added} new idea(s) from quick capture are in your Inbox.`); }
+    } catch (e) { /* try again at the next check */ } finally { pulling = false; }
+  }
+  /** 📤 a file for the Mind Desk artifact; remembers what everything looked like, so the answer can be merged */
+  function sendToClaude() {
+    if (busy()) return;
+    const id = C.uid('rt'); const at = Date.now();
+    const o = exportObj(); o.roundTrip = { id, at, from: 'cloud' };
+    S.sentToClaude = { id, at, base: C.roundTripBase(S) }; save();
+    download(`mind-desk-for-claude-${today()}.json`, JSON.stringify(o, null, 1), 'application/json');
+    toast('File downloaded. In the Mind Desk artifact: Settings → Restore from backup…', 8000);
+    if (UI.view === 'settings') renderContent();
+  }
+  async function mergeFile(f) {
+    try {
+      let o; try { o = JSON.parse(await f.text()); } catch (e) { throw new Error('This file cannot be read. Choose the backup you downloaded in the Mind Desk artifact.'); }
+      const problem = C.backupProblem(o);
+      if (problem) throw new Error('This file cannot be used. Nothing was changed.\n\n' + problem);
+      if (RUN.active) throw new Error('Please wait until the AI run has finished.');
+      const sent = S.sentToClaude; const match = sent && o.roundTrip && o.roundTrip.id === sent.id;
+      if (!match && !(await ask(sent ? 'This file does not come from your last “Send to Claude” (' + fmtTime(sent.at) + '). Merge it anyway? Everything here is kept; new things from the file are added, and where both changed, the newer one is used.' : 'You have not used “Send to Claude” yet. Merge this file anyway? Everything here is kept; new things from the file are added.', { okText: 'Merge anyway' }))) return;
+      const m = C.mergeRoundTrip(S, migrate(o), match ? sent.base : null);
+      const a = m.summary.added; const u = m.summary.updated; const kept = m.summary.keptHere;
+      const lines = [];
+      if (a.items) lines.push(`${a.items} new organized item(s)`); if (u.items) lines.push(`${u.items} item(s) updated`);
+      if (a.tasks) lines.push(`${a.tasks} new task(s)`); if (u.notes) lines.push(`${u.notes} note(s) updated`);
+      if (a.memory || u.memory) lines.push(`${(a.memory || 0) + (u.memory || 0)} Memory change(s)`); if (a.words || u.words) lines.push(`${(a.words || 0) + (u.words || 0)} word change(s)`);
+      if (a.chats || u.chats) lines.push(`${(a.chats || 0) + (u.chats || 0)} chat(s)`);
+      if (m.summary.removed.items) lines.push(`${m.summary.removed.items} old item(s) replaced`);
+      if (kept.notes) lines.push(`${kept.notes} idea(s) you added here since sending are kept`);
+      if (m.summary.conflicts) lines.push(`${m.summary.conflicts} thing(s) changed on both sides (the newer one is used)`);
+      if (!(await ask('Bring back from Claude:\n• ' + (lines.length ? lines.join('\n• ') : 'nothing new') + '\n\nThe server keeps a copy of what is here now.', { okText: 'Merge' }))) return;
+      if (RUN.active) throw new Error('Please wait until the AI run has finished.');
+      try { await PLAT.backupNow('before bring back'); } catch (e) { throw new Error('The server could not make a safety copy, so nothing was merged: ' + e.message); }
+      const settings = S.settings; S = migrate(m.state); S.settings = settings; S.sentToClaude = null; delete S.roundTrip;
+      const review = S.items.filter((i) => i.status === 'review').length;
+      UI.view = review ? 'review' : 'inbox'; UI.editing = null; save(); render();
+      toast(review ? `Merged. ${review} item(s) wait for your review.` : 'Merged.', 6000);
+    } catch (e) { showError(e); }
+  }
   async function loadState() {
     let raw;
-    try { raw = await store.get('state'); } catch (e) { LIFE.ok = false; fatal('Could not read your saved notes', 'The browser storage did not answer (' + ((e && e.message) || e) + ').'); return false; }
+    try { raw = await store.get('state'); } catch (e) { LIFE.ok = false; fatal('Could not read your saved notes', (CLOUD ? 'Your server did not answer (' : 'The browser storage did not answer (') + ((e && e.message) || e) + ').'); return false; }
     S = migrate(raw); LIFE.rev = (raw && raw.rev) || 0; LIFE.ok = true; RUN.stop = false;
     UI.editing = null; UI.dirty = false; UI.draft = null;
     applyTheme(); render(); checkRecovery();
@@ -3019,6 +3158,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
       // another device or tab saved newer notes: stop saving here (the same protection as two windows on the PC)
       PLAT.onRemoteChange = () => { if (LIFE.ok && !LIFE.blocked) blockWindow('changed'); };
       PLAT.knownRev = () => LIFE.rev;
+      if (CLOUD) PLAT.onCaptures = pullCaptures;
     }
     await store.open();
     if (store.failed) { fatal('Could not open your saved notes', 'The browser storage could not be opened (' + store.failed + ').'); return; }
@@ -3028,6 +3168,7 @@ if (typeof module !== 'undefined') module.exports = MDCore;
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
     await initFolder(); paintSaveState();
     window.addEventListener('focus', checkRecovery);
+    if (CLOUD) { PLAT.startPolling(); pullCaptures(); }
   }
   start();
 })();

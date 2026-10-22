@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mind Desk – Log in</title>
+<link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#1d6b5f"><link rel="icon" href="/icon.svg">
+<style>/*__PAGECSS__*/</style>
+</head>
+<body>
+<main class="wrap">
+  <div class="brand"><div class="logo">MD</div><div><b>Mind Desk</b><small>sort your thoughts</small></div></div>
+  <form class="card" id="f" autocomplete="on">
+    <h1>Log in</h1>
+    <label for="user">User name</label><input id="user" name="username" autocomplete="username" required>
+    <label for="pw">Password</label><input id="pw" type="password" name="password" autocomplete="current-password" required>
+    <label for="code">6-digit code from your authenticator app</label><input id="code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456 (or a recovery code)" required>
+    <div class="row"><button class="primary" id="go" type="submit">Log in</button></div>
+    <div class="msg" id="msg" role="alert"></div>
+  </form>
+  <p class="hint">Lost your phone? Type one of your recovery codes instead of the 6-digit code.</p>
+</main>
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const next = new URLSearchParams(location.search).get('next') === '/capture' ? '/capture' : '/';
+  $('#f').addEventListener('submit', async (e) => {
+    e.preventDefault(); const m = $('#msg'); m.className = 'msg'; $('#go').disabled = true;
+    try {
+      const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-MD': '1' }, body: JSON.stringify({ user: $('#user').value, password: $('#pw').value, code: $('#code').value }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'Log in failed.');
+      if (j.usedRecovery) { m.className = 'msg info'; m.textContent = 'You used a recovery code. ' + j.recoveryLeft + ' left.'; await new Promise((x) => setTimeout(x, 1800)); }
+      location.href = next;
+    } catch (err) { m.className = 'msg bad'; m.textContent = err.message; $('#code').value = ''; $('#code').focus(); } finally { $('#go').disabled = false; }
+  });
+  $('#user').focus();
+})();
+</script>
+</body>
+</html>

@@ -39,6 +39,19 @@ if (!art.includes('window.MDArtifact = P') || art.includes('/*__')) throw new Er
 fs.writeFileSync(path.join(root, 'mind-desk-artifact.html'), art);
 console.log(`built mind-desk-artifact.html (${version}, ${(art.length / 1024).toFixed(0)} KB)`);
 
+/* cloud: the full page served by server/server.js after login, with the cloud platform instead of the artifact one */
+let cloud = read('index.html');
+cloud = cloud.replace('/*__CSS__*/', () => read('style.css'))
+  .replace('<script>\n/*__CORE__*/\n</script>', () => `<script>\n${read('core.js')}\n</script>\n<script>\n${read('platform-cloud.js')}\n</script>`)
+  .replace('/*__APP__*/', () => app('cloud'))
+  .replace('<link rel="icon"', '<link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#1d6b5f"><link rel="icon"')
+  .replace('Please open it in Microsoft Edge or Google Chrome.', 'Please allow JavaScript for this site.');
+if (!cloud.includes('window.MDCloud = P') || cloud.includes('/*__')) throw new Error('cloud build: a part is missing');
+fs.mkdirSync(path.join(root, 'server', 'public'), { recursive: true });
+fs.writeFileSync(path.join(root, 'server', 'public', 'app.html'), cloud);
+fs.writeFileSync(path.join(root, 'server', 'VERSION'), version + '\n');
+console.log(`built server/public/app.html (${version}, ${(cloud.length / 1024).toFixed(0)} KB)`);
+
 if (process.argv.includes('--zip')) {
   const dist = path.join(root, 'dist'); fs.mkdirSync(dist, { recursive: true });
   const stage = path.join(dist, 'mind-desk'); fs.rmSync(stage, { recursive: true, force: true }); fs.mkdirSync(stage);

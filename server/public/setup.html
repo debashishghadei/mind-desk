@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mind Desk – Setup</title>
+<link rel="icon" href="/icon.svg">
+<style>/*__PAGECSS__*/
+ol{padding-left:20px}li{margin-bottom:6px}.codes{columns:2;font-family:var(--mono);margin:8px 0}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <div class="brand"><div class="logo">MD</div><div><b>Mind Desk</b><small>first-time setup</small></div></div>
+  <form class="card" id="s1">
+    <h1>1. Create your login</h1>
+    <p class="hint">The setup code is in the file <code>SETUP-CODE.txt</code> in Mind Desk's data folder on your server (the server also printed it when it started).</p>
+    <label for="sc">Setup code</label><input id="sc" autocomplete="off" required>
+    <label for="user">User name</label><input id="user" autocomplete="username" required>
+    <label for="pw">Password (12 characters or more)</label><input id="pw" type="password" autocomplete="new-password" required minlength="12">
+    <label for="pw2">Password again</label><input id="pw2" type="password" autocomplete="new-password" required minlength="12">
+    <div class="row"><button class="primary" type="submit" id="go1">Next</button></div>
+    <div class="msg" id="m1" role="alert"></div>
+  </form>
+  <form class="card" id="s2" hidden>
+    <h1>2. Two-step code</h1>
+    <ol class="hint"><li>On your phone, open an authenticator app (Google Authenticator, Microsoft Authenticator…).</li>
+      <li>Add an account → <b>Enter a setup key</b>. Name: <b>Mind Desk</b>. Key: <span class="mono" id="secret"></span> (time based).</li>
+      <li>Type the 6-digit code the app shows.</li></ol>
+    <label for="code">6-digit code</label><input id="code" inputmode="numeric" autocomplete="one-time-code" required>
+    <div class="row"><button class="primary" type="submit" id="go2">Finish setup</button></div>
+    <div class="msg" id="m2" role="alert"></div>
+  </form>
+  <div class="card" id="s3" hidden>
+    <h1>3. Keep your recovery codes</h1>
+    <p class="hint">If you lose your phone, each of these codes lets you log in once instead of the 6-digit code. Write them down or save them in your password manager. They are shown only now.</p>
+    <div class="codes" id="codes"></div>
+    <div class="row"><button class="primary" id="go3">I saved them: open Mind Desk</button></div>
+  </div>
+</main>
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const post = async (url, body) => { const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-MD': '1' }, body: JSON.stringify(body) }); const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Something went wrong.'); return j; };
+  $('#s1').addEventListener('submit', async (e) => {
+    e.preventDefault(); const m = $('#m1'); m.className = 'msg';
+    if ($('#pw').value !== $('#pw2').value) { m.className = 'msg bad'; m.textContent = 'The two passwords are not the same.'; return; }
+    $('#go1').disabled = true;
+    try { const j = await post('/api/setup', { code: $('#sc').value, user: $('#user').value, password: $('#pw').value }); $('#secret').textContent = j.secret.replace(/(.{4})/g, '$1 ').trim(); $('#s1').hidden = true; $('#s2').hidden = false; $('#code').focus(); }
+    catch (err) { m.className = 'msg bad'; m.textContent = err.message; } finally { $('#go1').disabled = false; }
+  });
+  $('#s2').addEventListener('submit', async (e) => {
+    e.preventDefault(); const m = $('#m2'); m.className = 'msg'; $('#go2').disabled = true;
+    try { const j = await post('/api/setup/confirm', { code: $('#code').value }); $('#codes').innerHTML = ''; j.recovery.forEach((c) => { const d = document.createElement('div'); d.textContent = c; $('#codes').appendChild(d); }); $('#s2').hidden = true; $('#s3').hidden = false; }
+    catch (err) { m.className = 'msg bad'; m.textContent = err.message; } finally { $('#go2').disabled = false; }
+  });
+  $('#go3').addEventListener('click', () => { location.href = '/'; });
+  $('#sc').focus();
+})();
+</script>
+</body>
+</html>

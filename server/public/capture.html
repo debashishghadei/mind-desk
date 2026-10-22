@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mind Desk – Quick idea</title>
+<link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#1d6b5f"><link rel="icon" href="/icon.svg">
+<style>/*__PAGECSS__*/
+.wrap{margin-top:2vh;max-width:640px}
+textarea{min-height:42vh;resize:vertical;font-size:16px}
+.top{display:flex;align-items:center;gap:10px;margin-bottom:12px}.top .brand{margin:0;flex:1}
+.list{margin-top:16px}.item{border-top:1px solid var(--line);padding:8px 0;font-size:14px;color:var(--ink2);white-space:pre-wrap;overflow-wrap:anywhere}
+.item small{display:block;color:var(--ink3)}
+.chip{font-size:12px;padding:2px 8px;border-radius:10px;background:var(--warn-soft);color:var(--warn)}
+.chip.ok{background:var(--good-soft);color:var(--good)}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <div class="top"><div class="brand"><div class="logo">MD</div><div><b>Quick idea</b><small>it goes to your Mind Desk Inbox</small></div></div><a href="/">Open Mind Desk</a></div>
+  <form id="f">
+    <label for="t" class="hint" style="margin-top:0">Write or speak (use your keyboard's microphone). Messy is fine.</label>
+    <textarea id="t" autofocus placeholder="Your idea…"></textarea>
+    <div class="row"><button class="primary" type="submit" id="save">Save idea</button><span id="state" class="hint"></span></div>
+  </form>
+  <div class="msg" id="msg" role="status"></div>
+  <div class="list" id="list"></div>
+</main>
+<script>
+(() => {
+  'use strict';
+  const $ = (s) => document.querySelector(s);
+  const KEY = 'mind-desk-capture-queue'; const DONE = 'mind-desk-capture-done';
+  const load = (k) => { try { return JSON.parse(localStorage.getItem(k) || '[]'); } catch (e) { return []; } };
+  const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } };
+  const fmt = (t) => new Date(t).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  let sending = false;
+  function paint() {
+    const q = load(KEY); const d = load(DONE).slice(-5).reverse();
+    $('#state').textContent = q.length ? q.length + ' waiting to be sent' + (navigator.onLine ? '' : ' (offline)') : '';
+    const list = $('#list'); list.textContent = '';
+    for (const x of q.slice().reverse().concat(d)) {
+      const el = document.createElement('div'); el.className = 'item';
+      const small = document.createElement('small'); const chip = document.createElement('span');
+      chip.className = 'chip' + (x.sent ? ' ok' : ''); chip.textContent = x.sent ? 'saved' : 'waiting';
+      small.append(fmt(x.at) + ' · ', chip); el.append(small, x.text.length > 300 ? x.text.slice(0, 300) + '…' : x.text); list.appendChild(el);
+    }
+  }
+  /** send everything waiting, oldest first; anything that fails stays on the phone */
+  async function flush() {
+    if (sending) return; sending = true;
+    try {
+      let q = load(KEY);
+      while (q.length) {
+        const x = q[0];
+        const r = await fetch('/api/capture', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-MD': '1' }, body: JSON.stringify({ text: x.text, at: x.at, cid: x.cid }) });
+        if (r.status === 401) { msg('bad', 'Please log in again. Your idea is kept on this phone.'); setTimeout(() => { location.href = '/login?next=/capture'; }, 1500); return; }
+        if (!r.ok) { const j = await r.json().catch(() => ({})); msg('bad', (j.error || 'The server did not accept it.') + ' It is kept on this phone.'); return; }
+        q = load(KEY).filter((y) => y.cid !== x.cid); store(KEY, q);
+        const d = load(DONE); d.push(Object.assign({}, x, { sent: true })); store(DONE, d.slice(-20));
+      }
+    } catch (e) { /* offline: try again when the connection is back */ } finally { sending = false; paint(); }
+  }
+  function msg(kind, text) { const m = $('#msg'); m.className = 'msg ' + kind; m.textContent = text; }
+  $('#f').addEventListener('submit', async (e) => {
+    e.preventDefault(); const text = $('#t').value.replace(/\r\n?/g, '\n');
+    if (!text.trim()) { $('#t').focus(); return; }
+    const q = load(KEY); q.push({ cid: Date.now().toString(36) + Math.random().toString(36).slice(2, 8), at: Date.now(), text });
+    if (!store(KEY, q)) { msg('bad', 'This phone could not keep the idea. Copy it before closing.'); return; }
+    $('#t').value = ''; $('#t').focus();
+    msg('info', navigator.onLine ? 'Saving…' : 'Saved on this phone. It will be sent when you are online.');
+    await flush();
+    if (!load(KEY).length) msg('ok', 'Saved. It is waiting in your Mind Desk Inbox.');
+  });
+  window.addEventListener('online', flush);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) flush(); });
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+  paint(); flush();
+})();
+</script>
+</body>
+</html>
