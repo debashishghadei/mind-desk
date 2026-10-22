@@ -262,14 +262,14 @@ Answer only with JSON: {"reply":"","actions":[],"remember":[]}`,
   /* bulk versions for copy/paste mode (ChatGPT / Claude) */
   function bulkSplitPrompt(tpl, notes) {
     let user = 'There are several notes. Do the job for EACH note separately.\nAnswer only with JSON: {"notes":[{"id":"note id","starts":[...]}]}\n\n';
-    for (const n of notes) user += `=== NOTE ${n.id} ===\n` + n.blocks.map((b, k) => `[${k + 1}]${bmark(b, k)}\n${btext(b)}`).join('\n\n') + '\n\n';
+    for (const n of notes) user += `=== NOTE ${n.id} ===\n` + (n.note && n.note.instruction ? `(Extra instruction from the person for this note: ${n.note.instruction})\n` : '') + n.blocks.map((b, k) => `[${k + 1}]${bmark(b, k)}\n${btext(b)}`).join('\n\n') + '\n\n';
     return tpl + '\n\n' + user;
   }
   function bulkOrganizePrompt(tpl, items, ctx) {
     const all = items.map((i) => i.text).join('\n');
     const p = buildOrganizePrompt(tpl, all, ctx);
     let user = 'There are several notes. Do the job for EACH note separately and keep its id.\nAnswer only with JSON: {"results":[{"id":"note id","title":"","category":"","tasks":[],"text":""}]}\n\n';
-    for (const it of items) user += `=== NOTE ${it.id} ===\n<<<\n${it.text}\n>>>\n\n`;
+    for (const it of items) user += `=== NOTE ${it.id} ===\n${it.instruction ? `(Extra instruction from the person for this note: ${it.instruction})\n` : ''}<<<\n${it.text}\n>>>\n\n`;
     return p.system + '\n\n' + user;
   }
   function bulkSurveyPrompt(tpl, text, ctx) { const p = buildSurveyPrompt(tpl, text, ctx); return p.system + '\n\n' + p.user; }
@@ -674,6 +674,13 @@ Answer only with JSON: {"reply":"","actions":[],"remember":[]}`,
     return { system, user, ids: c.ids };
   }
   /** keep only actions that point to things that exist; returns {actions, dropped} */
+  /** the "reply" text from a JSON answer that is still being written (for the live chat bubble) */
+  function partialReply(raw) {
+    const m = String(raw || '').match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)/);
+    if (!m) return '';
+    let body = m[1].replace(/\\(u[0-9a-fA-F]{0,3})?$/, ''); // drop a cut-off escape at the end
+    try { return JSON.parse('"' + body + '"'); } catch (e) { return body.replace(/\\n/g, '\n').replace(/\\"/g, '"'); }
+  }
   function checkChatActions(list, state, ids) {
     const out = []; let dropped = 0; const cats = state.categories;
     const assign = assignableCats(cats).map((c) => c.id); const subs = todoSubs(cats).map((c) => c.id);
@@ -818,7 +825,7 @@ Answer only with JSON: {"reply":"","actions":[],"remember":[]}`,
   return {
     uid, defaultCategories, DEFAULT_PROMPTS, SCHEMAS, children, subtreeIds, isTodoCat, catPath, assignableCats, todoSubs,
     makeBlocks, groupsFromStarts, blockWindows, parseJSON, fill, protectedTerms, buildSplitPrompt, buildSurveyPrompt,
-    buildOrganizePrompt, bulkSplitPrompt, bulkOrganizePrompt, bulkSurveyPrompt, diff, changeRatio, countTerm, checkOrganize,
+    partialReply, buildOrganizePrompt, bulkSplitPrompt, bulkOrganizePrompt, bulkSurveyPrompt, diff, changeRatio, countTerm, checkOrganize,
     checkSurvey, fmtDate, safeName, categoryMarkdown, allMarkdown, visibleTasks, validBackup, backupProblem, itemsIn, linkedTasks,
     editDistance, splitOriginal, taskSupport, taskDone, charChange, wordMatch, EDIT_RULES, buildFixPrompt, buildReport, nameCandidates, hideNames,
     buildChatContext, buildChatPrompt, checkChatActions, checkRemember,

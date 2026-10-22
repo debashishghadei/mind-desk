@@ -51,6 +51,10 @@ Settings → **How much may the AI change your text?**: "Fix typos only" (defaul
 
 Your original notes are never changed. They stay in the Inbox.
 
+## On claude.ai: the Mind Desk artifact
+
+The same app also runs as a Claude artifact (`mind-desk-artifact.html`, published on claude.ai). There Claude does the work with your own Claude plan: no Ollama, no API key, works on your phone. Your notes are saved in the artifact's private storage on your Claude account, so the PC browser and the phone show the same notes. ⚡ Fast uses Claude's quick model, 🧠 Careful its main model. To move your notes from the PC: **Download backup** here, then **Restore from backup…** in the artifact.
+
 ## Without Ollama: ChatGPT or Claude
 
 Settings → **Copy & paste**. Mind Desk shows a prompt, you paste it into ChatGPT or Claude and paste the answer back (three rounds: split, questions, organize). Your notes leave your PC in this mode.
@@ -67,6 +71,6 @@ Replace `mind-desk.html` (and the `.bat`) with the new files. Your data stays.
 
 ## For developers
 
-- Source: `src/` (`core.js` logic, `app.js` interface, `style.css`, `index.html`). Build the single file with `node bin/build.js` (`--zip` also makes `dist/mind-desk-<version>.zip`).
-- Tests: `tests/run-tests.js` runs Chromium (Playwright) against `mind-desk.html` opened from a `file://` URL, with a stand-in Ollama (`tests/fake-ollama.js`). `REAL_OLLAMA=http://127.0.0.1:11434` adds a check against a real Ollama. `tests/review-tests.js` and `tests/review2-tests.js` cover the two review rounds; `tests/v103-tests.js` covers Fast/Careful; `tests/v104-tests.js` covers 1.0.4; `tests/v110-tests.js` covers Chat + Memory.
+- Source: `src/` (`core.js` logic, `app.js` interface, `style.css`, `index.html`; artifact only: `platform-artifact.js`, `artifact.css`). `node bin/build.js` builds both `mind-desk.html` (PC) and `mind-desk-artifact.html` (claude.ai artifact) (`--zip` also makes `dist/mind-desk-<version>.zip` with the PC version).
+- Tests: `tests/run-tests.js` runs Chromium (Playwright) against `mind-desk.html` opened from a `file://` URL, with a stand-in Ollama (`tests/fake-ollama.js`). `REAL_OLLAMA=http://127.0.0.1:11434` adds a check against a real Ollama. `tests/review-tests.js` and `tests/review2-tests.js` cover the two review rounds; `tests/v103-tests.js` covers Fast/Careful; `tests/v104-tests.js` covers 1.0.4; `tests/v110-tests.js` covers Chat + Memory; `tests/artifact-tests.js` tests the artifact with a stand-in for claude.ai (`tests/artifact-stub.js`: database, Claude, downloads).
 - Shared notes for the AIs working on this repo: `HANDOFF.md`, `DECISIONS.md`.

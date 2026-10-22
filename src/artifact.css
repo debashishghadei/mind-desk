@@ -1,0 +1,4 @@
+/* artifact build only: fit inside the claude.ai viewer (its page already pads the top and bottom for the phone's system bars) */
+.app{height:100%}
+.toast{bottom:calc(18px + env(safe-area-inset-bottom,0px))}
+.livepanel{bottom:calc(16px + env(safe-area-inset-bottom,0px))}

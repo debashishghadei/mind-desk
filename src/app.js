@@ -3,6 +3,11 @@
   'use strict';
   const C = window.MDCore;
   const VERSION = '__VERSION__';
+  /* Two builds from one source: "pc" (mind-desk.html, a file on the PC with Ollama) and
+     "artifact" (mind-desk-artifact.html, published on claude.ai: Claude answers, notes live in the artifact's private storage). */
+  const TARGET = '__TARGET__';
+  const ART = TARGET === 'artifact';
+  const PLAT = ART ? window.MDArtifact : null; // artifact platform (storage, Claude, downloads)
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -13,7 +18,7 @@
   const FOLDER = { handle: null, ok: false, name: '', msg: '' };
 
   /* ================= storage ================= */
-  const store = {
+  const pcStore = {
     db: null, failed: '',
     async open() {
       if (typeof indexedDB === 'undefined') { this.db = null; return; } // simple storage mode
@@ -55,6 +60,8 @@
       return new Promise((res) => { const tx = this.db.transaction('kv', 'readwrite'); tx.objectStore('kv').delete(k); tx.oncomplete = () => res(); tx.onerror = () => res(); });
     },
   };
+  // the artifact keeps notes in the artifact's private database (falls back to this browser's storage when there is none)
+  const store = ART ? PLAT.makeStore(pcStore) : pcStore;
 
   function defaultSettings() {
     return {
@@ -62,6 +69,7 @@
       mode: 'fast', thinkSplit: true, thinkSurvey: true, thinkOrganize: true, // Careful mode: which steps let the AI think first
       thinkLimitSec: 120, editStyle: 'typos', sidebar: 'show',
       oaUrl: 'http://localhost:3001/api/v1/openai', oaKey: '', oaModel: '', manualBatch: 20, survey: true, surveyMax: 8, theme: 'auto',
+      ...(ART ? { provider: 'claude' } : {}),
     };
   }
   function defaultState() {
@@ -77,6 +85,8 @@
     out.settings = Object.assign(defaultSettings(), (s && s.settings) || {});
     if ('think' in out.settings) { if (out.settings.think === true && !(s.settings && s.settings.mode)) out.settings.mode = 'careful'; delete out.settings.think; } // 1.0.2 had one on/off switch
     if (!['fast', 'careful'].includes(out.settings.mode)) out.settings.mode = 'fast';
+    if (ART) { out.settings.provider = 'claude'; out.settings.theme = 'auto'; } // the artifact always uses Claude and the viewer's theme
+    else if (out.settings.provider === 'claude') out.settings.provider = 'ollama'; // a backup from the artifact, restored on the PC
     out.prompts = Object.assign({ split: null, survey: null, organize: null, fix: null, chat: null }, (s && s.prompts) || {});
     for (const k of ['notes', 'items', 'tasks', 'words', 'rules', 'memory', 'chats', 'folderFiles', 'folderOriginals', 'runLog']) if (!Array.isArray(out[k])) out[k] = [];
     // 1.1.0: "My rules" become Memory (one list the AI uses everywhere)
@@ -96,8 +106,8 @@
     if (!LIFE.ok || LIFE.blocked || !S) return; // never write when the load failed or another window is in charge
     saveState = 'saving'; paintSaveState();
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(writeState, 250);
-    if (opts && opts.folder === false) return; // folder bookkeeping only: no new folder copy
+    saveTimer = setTimeout(writeState, ART ? 700 : 250); // the artifact database is remote: gather quick changes into one write
+    if (ART || (opts && opts.folder === false)) return; // folder bookkeeping only: no new folder copy
     clearTimeout(folderTimer);
     folderTimer = setTimeout(syncFolder, 1500);
   }
@@ -111,14 +121,19 @@
       const next = LIFE.rev + 1; S.rev = next;
       const ok = await store.putState(S, LIFE.rev);
       if (ok) { LIFE.rev = next; saveState = writeAgain ? 'saving' : 'saved'; } else { saveState = 'error'; blockWindow('changed'); }
-    } catch (e) { saveState = 'error'; toast('Could not save: ' + e.message + '. Mind Desk will try again with your next change.', 6000); } finally { writing = false; }
+    } catch (e) {
+      saveState = 'error'; toast('Could not save: ' + ((e && e.message) || (e && e.code) || e) + '. Mind Desk will try again' + (ART ? ' in a moment.' : ' with your next change.'), 6000);
+      if (ART) { LIFE.retry = Math.min(60000, (LIFE.retry || 2500) * 2); clearTimeout(saveTimer); saveTimer = setTimeout(writeState, LIFE.retry); } // the database can be briefly unavailable
+    } finally { writing = false; }
+    if (saveState === 'saved') LIFE.retry = 0;
     paintSaveState();
     if (writeAgain && !LIFE.blocked) { writeAgain = false; writeState(); }
   }
   function paintSaveState() {
     const el = $('#savestate'); if (!el) return;
     const f = FOLDER.handle ? (FOLDER.ok ? ` · folder “${esc(FOLDER.name)}”` : ' · <a href="#" data-act="reconnectFolder">reconnect folder</a>') : '';
-    el.innerHTML = (saveState === 'saved' ? 'Saved' : saveState === 'saving' ? 'Saving…' : '<span style="color:var(--bad)">Not saved</span>') + f + (LIFE.noLock ? ' · <span title="Only one Mind Desk window should be open">one-window check off</span>' : '');
+    const where = ART ? (PLAT.mode === 'db' ? '' : PLAT.mode === 'local' ? ' · <span style="color:var(--warn)" title="' + esc(PLAT.reason) + '">only in this browser</span>' : ' · <span style="color:var(--bad)" title="' + esc(PLAT.reason) + '">not kept after closing</span>') : '';
+    el.innerHTML = (saveState === 'saved' ? 'Saved' : saveState === 'saving' ? 'Saving…' : '<span style="color:var(--bad)">Not saved</span>') + where + f + (LIFE.noLock && !ART ? ' · <span title="Only one Mind Desk window should be open">one-window check off</span>' : '');
   }
 
   /* ================= helpers ================= */
@@ -207,10 +222,46 @@
     const f = focusSel ? o.querySelector(focusSel) : o.querySelector('textarea:not([readonly]),input'); if (f) f.focus();
     return o;
   }
-  function closeModal() { const o = $('#overlay'); if (o) o.remove(); const app = $('.app'); if (app && !LIFE.blocked) app.inert = false; }
+  function closeModal() { const o = $('#overlay'); if (o) o.remove(); const app = $('.app'); if (app && !LIFE.blocked && !$('#askbox')) app.inert = false; }
+  /**
+   * Ask the person: a yes/no question, or (with opts.input) a line of text. Resolves true/false or the text (null = cancelled).
+   * The PC build uses the browser's own dialogs; the artifact shows its own, because claude.ai artifacts cannot show them.
+   */
+  function ask(message, opts = {}) {
+    const input = typeof opts.input === 'string';
+    if (!ART) return Promise.resolve(input ? window.prompt(message, opts.input) : window.confirm(message));
+    return new Promise((resolve) => {
+      const old = $('#askbox'); if (old && old._done) old._done(input ? null : false);
+      const o = document.createElement('div'); o.className = 'overlay askover'; o.id = 'askbox';
+      o.innerHTML = `<div class="modal small-modal" role="alertdialog" aria-modal="true" aria-labelledby="askMsg"><p id="askMsg" class="pre" style="margin-top:0">${esc(message)}</p>
+        ${input ? `<input type="text" id="askIn" style="width:100%" value="${esc(opts.input)}" aria-label="${esc(message)}">` : ''}
+        <div class="actions"><button class="btn ${opts.danger ? 'primary dangerfill' : 'primary'}" id="askOk">${esc(opts.okText || 'OK')}</button><button class="btn" id="askNo">${esc(opts.cancelText || 'Cancel')}</button></div></div>`;
+      const prevFocus = document.activeElement;
+      const done = (v) => {
+        if (o._closed) return; o._closed = true; o.remove(); document.removeEventListener('keydown', key, true);
+        const app = $('.app'); if (app && !LIFE.blocked && !$('#overlay') && !$('#blocker')) app.inert = false;
+        const ov = $('#overlay'); if (ov) ov.inert = false;
+        if (prevFocus && prevFocus.focus && document.contains(prevFocus)) { try { prevFocus.focus(); } catch (e) { /* ignore */ } }
+        resolve(v);
+      };
+      o._done = done;
+      const ok = () => done(input ? $('#askIn', o).value : true);
+      const no = () => done(input ? null : false);
+      const key = (e) => {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); no(); }
+        else if (e.key === 'Enter' && (input ? e.target.id === 'askIn' : true) && e.target.id !== 'askNo') { e.preventDefault(); e.stopPropagation(); ok(); }
+      };
+      document.addEventListener('keydown', key, true);
+      document.body.appendChild(o);
+      const app = $('.app'); if (app) app.inert = true; const ov = $('#overlay'); if (ov) ov.inert = true;
+      $('#askOk', o).onclick = ok; $('#askNo', o).onclick = no;
+      o.addEventListener('mousedown', (e) => { if (e.target === o) no(); });
+      const f = input ? $('#askIn', o) : $(opts.danger ? '#askNo' : '#askOk', o); f.focus(); if (input) f.select();
+    });
+  }
   function showError(e) {
     const m = (e && e.message) || String(e);
-    modal(`<h2>Something went wrong</h2><p class="pre">${esc(m)}</p>${e && e.conn ? connHelpHtml() : ''}<div class="actions"><button class="btn primary" data-act="closeModal">OK</button></div>`, closeModal);
+    modal(`<h2>Something went wrong</h2><p class="pre">${esc(m)}</p>${e && e.conn && !e.claude ? connHelpHtml() : ''}<div class="actions"><button class="btn primary" data-act="closeModal">OK</button></div>`, closeModal);
   }
   function connHelpHtml() {
     return `<div class="banner info"><b>Quick fixes</b><ol class="steps">
@@ -324,13 +375,56 @@
       return splitThink(m.content, m.reasoning_content || m.reasoning || '');
     });
   }
+  /* Claude (artifact build): the viewer's own Claude plan answers through the artifact's "sample" capability.
+     Fast = the quick model, Careful = the default model, which thinks before answering (its thinking is not shown). */
+  const CLAUDE_STOP = { // these end the whole run; the others only fail the item or step at hand
+    not_granted: 'Mind Desk is not allowed to use Claude. You declined the request, or your organization does not allow it. Reload the page to be asked again.',
+    sampling_disabled: 'Claude is not available for this account here.',
+    not_declared: 'This version of Mind Desk cannot use Claude. Open the newest version of the artifact.',
+    capability_disabled: 'Claude cannot be used in this view of the artifact. Open it on claude.ai or in the Claude app.',
+    capability_removed: 'Claude cannot be used in this view of the artifact. Update the Claude app or open it on claude.ai.',
+    rate_limited: 'Claude says: too many requests, or your plan’s usage limit is reached. Nothing is lost. Wait a while, then press the button again.',
+    session_expired: 'Your claude.ai sign-in has expired. Sign in again, then press the button again.',
+    unavailable: 'Claude is not available here. Open Mind Desk on claude.ai or in the Claude app, signed in.',
+  };
+  const CLAUDE_FAIL = {
+    refused: 'Claude declined to answer this text.',
+    empty_completion: 'Claude gave an empty answer.',
+    prompt_too_large: 'This is too long for one request. Split the note with --- lines and try again.',
+    upstream_error: 'Claude could not be reached just now (a network or service problem). Try again in a moment.',
+    invalid_request: 'Mind Desk sent a request Claude could not read (a bug: please send a Report for Claude).',
+    transform_error: 'Mind Desk sent a request Claude could not read (a bug: please send a Report for Claude).',
+  };
+  function claudeErr(e) {
+    const code = (e && e.code) || 'upstream_error';
+    if (code === 'cancelled') return abortErr();
+    const err = new Error(CLAUDE_STOP[code] || CLAUDE_FAIL[code] || ('Claude: ' + ((e && e.message) || code)));
+    err.code = code; err.claude = true; if (CLAUDE_STOP[code]) err.conn = true; // conn = stop the run
+    return err;
+  }
+  async function claudeChat(system, user, careful) {
+    const sample = PLAT && PLAT.sample;
+    if (!sample) throw claudeErr({ code: 'unavailable' });
+    const ctrl = new AbortController(); RUN.ctrl = ctrl;
+    try {
+      const r = await sample(user ? system + '\n\n' + user : system, {
+        modelTier: careful ? 'default' : 'quick', cache: false, signal: ctrl.signal,
+        onText: ({ text }) => { liveUpdate('', text); if (RUN.onText) { try { RUN.onText(text); } catch (e) { /* ignore */ } } },
+      });
+      if (r.truncated) { const e = new Error('Claude’s answer was cut off because it was too long. Fewer or shorter notes at a time will work.'); e.truncated = true; e.claude = true; throw e; }
+      return { content: r.text, thinking: '', tier: r.modelTierApplied };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      throw claudeErr(e);
+    } finally { if (RUN.ctrl === ctrl) RUN.ctrl = null; }
+  }
   const STEP_KEY = { split: 'thinkSplit', survey: 'thinkSurvey', organize: 'thinkOrganize' };
   /** does this step think in the current run? (Careful mode and the step is ticked in Settings) */
   const thinks = (step) => RUN.mode === 'careful' && S.settings[STEP_KEY[step]] !== false;
   /** one AI request that must return JSON; tries twice. Returns {data, thinking, ms, cut} and writes a line to the run log */
   async function aiJSON(step, system, user, noteName) {
     let last; let thinking = ''; let cut = false; const t0 = Date.now();
-    let think = thinks(step);
+    let think = S.settings.provider === 'claude' ? RUN.mode === 'careful' : thinks(step);
     const log = (ok, err) => {
       S.runLog.push({ at: Date.now(), step, note: noteName || '', mode: think || cut ? 'careful' : 'fast', ms: Date.now() - t0, ok, err: err || '', cut, thinkChars: thinking.length });
       if (S.runLog.length > 300) S.runLog.splice(0, S.runLog.length - 300);
@@ -341,7 +435,8 @@
         if (RUN.stop) throw abortErr();
         let r;
         try {
-          r = S.settings.provider === 'openai' ? await openaiChat(system, user) : await ollamaChat(system, user, C.SCHEMAS[step], step === 'organize' || step === 'fix' ? 1 : 0.2, think);
+          r = S.settings.provider === 'claude' ? await claudeChat(system, user, RUN.mode === 'careful')
+            : S.settings.provider === 'openai' ? await openaiChat(system, user) : await ollamaChat(system, user, C.SCHEMAS[step], step === 'organize' || step === 'fix' ? 1 : 0.2, think);
         } catch (e) {
           if (!e.thinkTooLong) throw e;
           cut = true; think = false; thinking += (e.thinking || '') + '\n[Thinking stopped after the time limit; answered in Fast mode.]';
@@ -380,6 +475,26 @@
       $('#mpCancel').onclick = () => { if (RUN.manualReject) RUN.manualReject(); };
     });
   }
+
+  /** steps that send many notes in one request: copy & paste mode, and Claude in the artifact */
+  const batched = () => S.settings.provider === 'manual' || S.settings.provider === 'claude';
+  /** one batched request: copy & paste shows the prompt; Claude answers it directly */
+  async function askBatch(step, title, text, name) {
+    if (S.settings.provider !== 'claude') return askManual(title, text);
+    return (await aiJSON(step, text, '', name || title)).data;
+  }
+  /** cut a list into groups of at most maxN entries and about maxChars characters */
+  function groupBy(list, size, maxN, maxChars) {
+    const out = []; let cur = []; let chars = 0;
+    for (const x of list) {
+      const n = size(x);
+      if (cur.length && (cur.length >= maxN || chars + n > maxChars)) { out.push(cur); cur = []; chars = 0; }
+      cur.push(x); chars += n;
+    }
+    if (cur.length) out.push(cur);
+    return out;
+  }
+  const CLAUDE_LIMIT = { split: 30000, survey: 30000, organizeN: 15, organizeChars: 12000 };
 
   /* ================= the organize run ================= */
   function setProgress(label, done, total) {
@@ -432,19 +547,30 @@
       if (blocks.length <= 1) addItemsFromGroups(n, blocks, blocks.length ? [[0]] : []); else payload.push({ id: n.id, note: n, blocks });
     }
     if (!payload.length) return;
-    const ans = await askManual('Step 1 of 3: split your notes', C.bulkSplitPrompt(prompt('split'), payload));
-    const list = Array.isArray(ans.notes) ? ans.notes : [];
-    for (const p of payload) {
-      const hit = list.find((x) => x && String(x.id) === p.id);
-      const all = p.blocks.map((_, k) => k);
-      addItemsFromGroups(p.note, p.blocks, C.groupsFromStarts(p.blocks.length, hit ? hit.starts : all.map((k) => k + 1), hardStarts(p.blocks, all)));
+    const claude = S.settings.provider === 'claude';
+    // copy & paste: one prompt for everything; Claude: parts of about 30,000 characters
+    const parts = claude ? groupBy(payload, (p) => p.note.text.length, 1e9, CLAUDE_LIMIT.split) : [payload];
+    for (let k = 0; k < parts.length; k++) {
+      if (RUN.stop) throw abortErr();
+      if (claude) setProgress('Splitting notes', k, parts.length);
+      let list = [];
+      try {
+        const ans = await askBatch('split', `Step 1 of 3: split your notes${parts.length > 1 ? ` (part ${k + 1} of ${parts.length})` : ''}`, C.bulkSplitPrompt(prompt('split'), parts[k]), parts[k][0].note.name);
+        list = Array.isArray(ans.notes) ? ans.notes : [];
+      } catch (e) { if (!claude || e.name === 'AbortError' || e.conn) throw e; } // Claude failed on this part: every block becomes an item (like the PC)
+      for (const p of parts[k]) {
+        const hit = list.find((x) => x && String(x.id) === p.id);
+        const all = p.blocks.map((_, i) => i);
+        addItemsFromGroups(p.note, p.blocks, C.groupsFromStarts(p.blocks.length, hit ? hit.starts : all.map((i) => i + 1), hardStarts(p.blocks, all)));
+      }
+      if (claude) { save(); render(); }
     }
   }
 
   /** the questions step reads every item completely: long items are cut into pieces, all pieces are sent */
   async function runSurvey(items) {
-    const manual = S.settings.provider === 'manual';
-    const limit = manual ? 30000 : 8000;
+    const manual = batched();
+    const limit = manual ? CLAUDE_LIMIT.survey : 8000;
     const chunks = []; let cur = { text: '', items: new Set() };
     const push = () => { if (cur.text) chunks.push(cur); cur = { text: '', items: new Set() }; };
     for (const it of items) {
@@ -459,7 +585,7 @@
     for (let i = 0; i < chunks.length; i++) {
       setProgress('Reading your notes for questions', i, chunks.length);
       try {
-        if (manual) all = all.concat((await askManual(`Step 2 of 3: questions about your notes${chunks.length > 1 ? ` (part ${i + 1} of ${chunks.length})` : ''}`, C.bulkSurveyPrompt(prompt('survey'), chunks[i].text, ctx()))).questions || []);
+        if (manual) all = all.concat((await askBatch('survey', `Step 2 of 3: questions about your notes${chunks.length > 1 ? ` (part ${i + 1} of ${chunks.length})` : ''}`, C.bulkSurveyPrompt(prompt('survey'), chunks[i].text, ctx()))).questions || []);
         else {
           const p = C.buildSurveyPrompt(prompt('survey'), chunks[i].text, ctx()); const a = await aiJSON('survey', p.system, p.user, [...chunks[i].items].map((it) => (noteOf(it) || {}).name).filter(Boolean)[0]);
           all = all.concat(a.data.questions || []); if (a.thinking) thoughts.push(a.thinking);
@@ -492,7 +618,11 @@
     const ins = (noteOf(it) || {}).instruction; if (ins) p.system += '\n\nExtra instruction from the person for this note: ' + ins;
     const nm = (noteOf(it) || {}).name;
     const a1 = await aiJSON('organize', p.system, p.user, nm);
-    let chk = C.checkOrganize(a1.data, it.original, c); let thinking = a1.thinking; let ms = a1.ms; let cut = a1.cut;
+    await strictAgain(it, p, c, nm, C.checkOrganize(a1.data, it.original, c), a1);
+  }
+  /** a serious warning (lost words, a changed number or "not"): ask once more, stricter, and keep the better answer */
+  async function strictAgain(it, p, c, nm, chk0, a1) {
+    let chk = chk0; let thinking = a1.thinking; let ms = a1.ms; let cut = a1.cut;
     if (chk.flags.some((f) => SERIOUS.includes(f))) {
       const strict = p.system + (S.settings.editStyle === 'clean'
         ? '\n\nIMPORTANT: a previous answer lost content or changed a fact (a number, a name, a "not"). Keep every point, number, name and "not" exactly; only fix typos and make sentences clearer.'
@@ -505,6 +635,38 @@
       } catch (e) { if (e.name === 'AbortError' || e.conn) throw e; }
     }
     applyResult(it, chk, thinking, ms, cut);
+  }
+  /** Claude: about 15 notes per request; flagged answers are asked again on their own, stricter */
+  async function organizeClaude(items) {
+    const c = ctx();
+    const parts = groupBy(items, (i) => i.original.length, CLAUDE_LIMIT.organizeN, CLAUDE_LIMIT.organizeChars);
+    let done = 0;
+    for (let k = 0; k < parts.length; k++) {
+      if (RUN.stop) throw abortErr();
+      const batch = parts[k].filter(alive); if (!batch.length) continue;
+      setProgress('Organizing', done, items.length);
+      let res = null;
+      if (batch.length > 1) {
+        try {
+          const ans = await askBatch('organize', 'organize', C.bulkOrganizePrompt(prompt('organize'), batch.map((i) => ({ id: i.id, text: i.original, instruction: (noteOf(i) || {}).instruction })), c), (noteOf(batch[0]) || {}).name);
+          res = Array.isArray(ans.results) ? ans.results : [];
+        } catch (e) { if (e.name === 'AbortError' || e.conn) throw e; res = null; } // the whole part failed: ask note by note below
+      }
+      for (const it of batch) {
+        if (RUN.stop) throw abortErr();
+        if (!alive(it)) continue;
+        const r = res && res.find((x) => x && String(x.id) === it.id);
+        try {
+          if (r) {
+            const nm = (noteOf(it) || {}).name; const p = C.buildOrganizePrompt(prompt('organize'), it.original, c);
+            const ins = (noteOf(it) || {}).instruction; if (ins) p.system += '\n\nExtra instruction from the person for this note: ' + ins;
+            await strictAgain(it, p, c, nm, C.checkOrganize(r, it.original, c), { thinking: '', ms: 0, cut: false });
+          } else await organizeOne(it); // missing in the answer (or the part failed): this note on its own
+        } catch (e) { if (e.name === 'AbortError' || e.conn) throw e; failItem(it, e); }
+        done++; setProgress('Organizing', done, items.length);
+        save(); if (UI.view === 'inbox') renderContent();
+      }
+    }
   }
   async function organizeManual(items) {
     const size = Math.max(1, +S.settings.manualBatch || 20); const parts = Math.ceil(items.length / size); let missing = 0;
@@ -526,12 +688,12 @@
   /** organize new notes; with noteIds, only those notes */
   async function organizeAll(noteIds) {
     if (RUN.active) return;
-    const manual = S.settings.provider === 'manual';
+    const manual = batched();
     const mine = (n) => !noteIds || noteIds.includes(n.id);
     const mineItem = (i) => !noteIds || noteIds.includes(i.noteId);
     if (!S.notes.some((n) => n.status === 'new' && mine(n)) && !S.items.some((i) => i.status === 'pending' && mineItem(i))) { toast(noteIds ? 'This note is already organized.' : 'Nothing new to organize. Add notes first.'); return; }
     const warn = remoteWarning().filter((w) => !/Copy & paste/.test(w));
-    if (warn.length && !window.confirm(warn.join('\n') + '\n\nContinue?')) return;
+    if (warn.length && !(await ask(warn.join('\n') + '\n\nContinue?', { okText: 'Continue' }))) return;
     RUN.active = true; RUN.stop = false; RUN.mode = S.settings.mode; paintTop();
     try {
       const fresh = S.notes.filter((n) => n.status === 'new' && mine(n));
@@ -560,7 +722,8 @@
         }
       } else unsurveyed.forEach((i) => { i.surveyed = true; });
       const todo = S.items.filter((i) => i.status === 'pending' && mineItem(i));
-      if (manual) { setProgress('Organizing', 0, 0); await organizeManual(todo); } else {
+      if (S.settings.provider === 'claude') await organizeClaude(todo);
+      else if (manual) { setProgress('Organizing', 0, 0); await organizeManual(todo); } else {
         for (let i = 0; i < todo.length; i++) {
           if (RUN.stop) throw abortErr();
           setProgress('Organizing', i, todo.length);
@@ -581,7 +744,7 @@
 
   /* ================= folder sync ================= */
   async function initFolder() {
-    if (!('showDirectoryPicker' in window) || !store.db) return;
+    if (ART || !('showDirectoryPicker' in window) || !store.db) return;
     try {
       const h = await store.get('folder'); if (!h) return;
       FOLDER.handle = h; FOLDER.name = h.name;
@@ -633,6 +796,12 @@
     return o;
   }
   function download(name, text, type) {
+    if (ART) { // artifacts cannot start downloads themselves: the viewer confirms the file
+      const d = PLAT.downloads;
+      if (!d) { toast('Saving files is not available here. Use Copy instead, or open Mind Desk on claude.ai.', 6000); return Promise.resolve(false); }
+      return d.save({ filename: name, data: text }).then((r) => { if (r && r.status === 'saved') toast('Saved ' + name); return true; })
+        .catch((e) => { const c = e && e.code; if (c !== 'cancelled' && c !== 'declined' && c !== 'dismissed') toast('The file was not saved' + (c ? ' (' + c + ')' : '') + '.', 6000); return false; });
+    }
     const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
   }
@@ -944,12 +1113,12 @@
     const c = curChat();
     const list = [...S.chats].reverse().map((x) => `<div class="noteitem${c && x.id === c.id ? ' on' : ''}" data-act="openChat" data-id="${esc(x.id)}"><div class="row"><div class="nm" style="flex:1">${esc(x.title)}</div><button class="btn small link" data-act="delChat" data-id="${esc(x.id)}" title="Delete this chat">✕</button></div><div class="sub">${esc(fmtTime(x.updatedAt || x.createdAt))}</div></div>`).join('');
     const ex = ['What are my job to-dos?', 'Show me how you organized note “' + ((S.notes[S.notes.length - 1] || {}).name || '1') + '”', 'Remember: BR is my client, not my own business', 'Move my gym notes to Personal goals'];
-    const msgs = c && c.messages.length ? c.messages.map((m) => msgHtml(c, m)).join('') + (RUN.active && RUN.chatId === c.id ? '<div class="msg ai"><div class="bubble muted">…</div></div>' : '')
+    const msgs = c && c.messages.length ? c.messages.map((m) => msgHtml(c, m)).join('') + (RUN.active && RUN.chatId === c.id ? `<div class="msg ai"><div class="bubble muted pre" id="liveReply">${esc(UI.liveReply || '…')}</div></div>` : '')
       : `<div class="empty"><b>Chat with Mind Desk</b>Ask about your notes, tell it what to change, or teach it how you think and write. It never changes anything until you click <b>Apply</b>.<div class="row" style="justify-content:center;margin-top:14px">${ex.map((e) => `<button class="btn small" data-act="chatExample">${esc(e)}</button>`).join('')}</div></div>`;
     return `<div class="pane list chatlist"><div class="tools"><button class="btn" data-act="newChat">＋ New chat</button></div>${list || '<p class="muted small" style="padding:12px">Your chats are saved here.</p>'}</div>
       <div class="chatmain"><div class="msgs" id="msgs">${msgs}</div>
       <div class="composer"><textarea id="chatIn" rows="2" placeholder="Ask about your notes, or tell Mind Desk what to change… (Enter = send, Shift+Enter = new line)">${esc(UI.chatDraft || '')}</textarea><button class="btn primary" data-act="sendChat" ${RUN.active ? 'disabled' : ''}>Send</button></div>
-      <div class="muted small" style="padding:0 16px 10px">${S.settings.provider === 'manual' ? 'Copy & paste mode: your message goes to ChatGPT or Claude.' : (S.settings.mode === 'careful' ? '🧠 Careful: the AI thinks first (slower).' : '⚡ Fast answers.') + ' Change it at the top right.'} Memory: ${S.memory.length} item(s).</div></div>`;
+      <div class="muted small" style="padding:0 16px 10px">${S.settings.provider === 'manual' ? 'Copy & paste mode: your message goes to ChatGPT or Claude.' : (S.settings.mode === 'careful' ? '🧠 Careful: the AI thinks first (slower).' : '⚡ Fast answers.') + ' Change it at the top.'} Memory: ${S.memory.length} item(s).</div></div>`;
   }
   function scrollChat() { const m = $('#msgs'); if (m) m.scrollTop = m.scrollHeight; }
   function findAction(el) {
@@ -966,8 +1135,10 @@
   function viewSettings() {
     const s = S.settings; const p = s.provider;
     const radio = (v, label) => `<label style="display:block;margin-bottom:4px"><input type="radio" name="prov" data-set="provider" value="${v}" ${p === v ? 'checked' : ''}> ${label}</label>`;
-    let ai = `<div class="box"><h2>AI connection</h2>${radio('ollama', '<b>Ollama</b> on this PC (private and free) — recommended')}${radio('manual', '<b>Copy &amp; paste</b> with ChatGPT or Claude (no setup; your notes leave your PC)')}${radio('openai', '<b>Other local AI</b> with an OpenAI-style API (AnythingLLM, LM Studio…)')}<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">`;
-    if (p === 'ollama') {
+    let ai = ART ? `<div class="box"><h2>AI: Claude</h2>
+      <p class="hint">Mind Desk asks Claude with your own Claude plan, so there is nothing to set up and no extra cost beyond your plan’s usage. The first time, Claude asks you to allow it. Your notes go to Claude only when you press a button (Organize, Ask AI again, Fix my typing, Chat).</p>
+      <div class="row"><button class="btn" data-act="testAI">Try a quick test note</button></div><div id="connResult" style="margin-top:10px">${UI.connResult}</div></div>` : `<div class="box"><h2>AI connection</h2>${radio('ollama', '<b>Ollama</b> on this PC (private and free) — recommended')}${radio('manual', '<b>Copy &amp; paste</b> with ChatGPT or Claude (no setup; your notes leave your PC)')}${radio('openai', '<b>Other local AI</b> with an OpenAI-style API (AnythingLLM, LM Studio…)')}<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">`;
+    if (ART) { /* Claude only */ } else if (p === 'ollama') {
       ai += `<div class="grid2">${sField('ollamaUrl', 'Ollama address')}<div class="field"><label for="set-model">Model</label><input type="text" id="set-model" data-set="model" value="${esc(s.model)}" list="modelList"><datalist id="modelList"></datalist></div></div>
         <div class="row"><button class="btn" data-act="testConn">Test connection</button><button class="btn" data-act="testAI">Try a quick test note</button></div>
         <div id="connResult" style="margin-top:10px">${UI.connResult}</div>
@@ -980,10 +1151,12 @@
     } else {
       ai += `<p class="hint">Mind Desk shows you a prompt to copy into ChatGPT or Claude, and you paste the answer back. Three short rounds: split, questions, organize.</p>${sField('manualBatch', 'Notes per prompt in the organize step', 'number', 'min="1" max="100"')}`;
     }
-    const warns = remoteWarning();
+    const warns = ART ? [] : remoteWarning();
     if (warns.length) ai += warns.map((w) => `<div class="banner${/Copy & paste/.test(w) ? ' info' : ' bad'}" style="margin-top:12px">${esc(w)}</div>`).join('');
-    ai += '</div>';
-    const mode = s.provider === 'manual' ? '' : `<div class="box"><h2>Fast or Careful</h2>
+    if (!ART) ai += '</div>';
+    const mode = s.provider === 'claude' ? `<div class="box"><h2>Fast or Careful</h2>
+      <p class="hint">Choose next to <b>✨ Organize all</b> each time. <b>⚡ Fast</b>: Claude’s quick model answers in seconds and uses little of your plan. <b>🧠 Careful</b>: Claude’s main model thinks before it answers. Slower and uses more of your plan, but better at understanding what you meant. (Claude’s thinking is not shown here.)</p></div>`
+      : s.provider === 'manual' ? '' : `<div class="box"><h2>Fast or Careful</h2>
       <p class="hint">Choose next to <b>✨ Organize all</b> each time. <b>⚡ Fast</b>: quick answers, no thinking. <b>🧠 Careful</b>: the AI thinks first. Slower (often 2–3 times), but better at understanding what you meant. The thinking is saved and folded away under <b>Show AI’s thinking</b>.</p>
       <p style="margin:8px 0 4px">In Careful mode, let the AI think in:</p>
       <div class="row">${sField('thinkSplit', 'Step 1: splitting notes', 'checkbox')}${sField('thinkSurvey', 'Step 2: questions', 'checkbox')}${sField('thinkOrganize', 'Step 3: organizing (typos, category, tasks)', 'checkbox')}</div>
@@ -995,9 +1168,9 @@
       ${er('clean', 'Clean up wording', '— fixes typos and makes sentences clearer; facts, numbers, names and “not” must stay')}
       <p class="muted small">Used when organizing and by <b>✨ Fix my typing</b> in the editor. Your original text is always kept.</p></div>`;
     const survey = `<div class="box"><h2>Questions before organizing</h2>${sField('survey', 'Let the AI ask me about words and notes it does not understand', 'checkbox')}<div style="max-width:220px;margin-top:8px">${sField('surveyMax', 'Maximum questions per run', 'number', 'min="1" max="20"')}</div></div>`;
-    return ai + mode + writing + survey + reportBox() + catEditor() + promptEditor() + storageBox() + `<div class="box"><h2>Look</h2><div class="field" style="max-width:220px"><label for="set-theme">Theme</label>
-      <select id="set-theme" data-set="theme"><option value="auto"${s.theme === 'auto' ? ' selected' : ''}>Same as Windows</option><option value="light"${s.theme === 'light' ? ' selected' : ''}>Light</option><option value="dark"${s.theme === 'dark' ? ' selected' : ''}>Dark</option></select></div></div>
-      <div class="box"><h2>Danger zone</h2><button class="btn danger" data-act="deleteAll">Delete everything in Mind Desk</button><p class="muted small">Mind Desk ${esc(VERSION)}</p></div>`;
+    return ai + mode + writing + survey + reportBox() + catEditor() + promptEditor() + storageBox() + (ART ? '' : `<div class="box"><h2>Look</h2><div class="field" style="max-width:220px"><label for="set-theme">Theme</label>
+      <select id="set-theme" data-set="theme"><option value="auto"${s.theme === 'auto' ? ' selected' : ''}>Same as Windows</option><option value="light"${s.theme === 'light' ? ' selected' : ''}>Light</option><option value="dark"${s.theme === 'dark' ? ' selected' : ''}>Dark</option></select></div></div>`) + `
+      <div class="box"><h2>Danger zone</h2><button class="btn danger" data-act="deleteAll">Delete everything in Mind Desk</button><p class="muted small">Mind Desk ${esc(VERSION)}${ART ? ' (Claude artifact)' : ''}</p></div>`;
   }
   function ollamaHelp() {
     return `<ol class="steps">
@@ -1042,6 +1215,14 @@
       <div class="row"><button class="btn" data-act="report" data-scope="review">Report: items waiting for review</button><button class="btn" data-act="report" data-scope="all">Report: all notes</button></div></div>`;
   }
   function storageBox() {
+    if (ART) {
+      const where = PLAT.mode === 'db' ? 'Everything is saved automatically in this artifact’s private storage on your Claude account. Only you can see it, also if you share the artifact. Open the same artifact on your phone or another computer to see the same notes.'
+        : PLAT.mode === 'local' ? `<span style="color:var(--warn)">Your notes are saved only in this browser (${esc(PLAT.reason)}). Open Mind Desk on claude.ai, signed in, to keep them in your account.</span>`
+          : `<span style="color:var(--bad)">Your notes are NOT kept after you close this page (${esc(PLAT.reason)}). Download a backup before closing.</span>`;
+      return `<div class="box"><h2>Saving &amp; backup</h2><p class="hint">${where} Make a backup now and then.</p>
+        <p class="hint">Coming from Mind Desk on your PC? There, use <b>Download backup</b>, then here <b>Restore from backup…</b>.</p>
+        <div class="row"><button class="btn" data-act="exportJSON">Download backup</button><button class="btn" data-act="importJSON">Restore from backup…</button><button class="btn" data-act="downloadMD">Download all as Markdown</button></div></div>`;
+    }
     const can = 'showDirectoryPicker' in window && !!store.db;
     let f = '';
     if (can) {
@@ -1057,7 +1238,7 @@
 
   /* ================= actions ================= */
   const ACT = {
-    nav(el) { if (!leaveEditor()) return; UI.view = el.dataset.v; UI.editing = null; UI.search = ''; render(); $('#content').scrollTop = 0; },
+    async nav(el) { const ok = leaveEditor(); if (ok !== true && !(await ok)) return; UI.sideOpen = false; applySide(); UI.view = el.dataset.v; UI.editing = null; UI.search = ''; render(); $('#content').scrollTop = 0; },
     closeModal() { closeModal(); },
     addFiles() { $('#fileInput').click(); },
     pasteNote() {
@@ -1073,22 +1254,26 @@
       closeModal(); UI.selNote = r.id; UI.view = 'inbox'; save(); render(); toast('Note added.');
     },
     selNote(el) { UI.selNote = el.dataset.id; renderContent(); },
-    renameNote(el) { const n = S.notes.find((x) => x.id === el.dataset.id); const v = window.prompt('New name', n.name); if (v && v.trim()) { n.name = v.trim().slice(0, 120); save(); render(); } },
-    deleteNote(el) {
+    async renameNote(el) { const n = S.notes.find((x) => x.id === el.dataset.id); const v = await ask('New name', { input: n.name, okText: 'Rename' }); if (v && v.trim() && S.notes.includes(n)) { n.name = v.trim().slice(0, 120); save(); render(); } },
+    async deleteNote(el) {
       if (busy()) return;
       const n = S.notes.find((x) => x.id === el.dataset.id); const its = S.items.filter((i) => i.noteId === n.id);
-      if (!window.confirm(`Delete “${n.name}”${its.length ? ` and the ${its.length} item(s) made from it` : ''}? This cannot be undone.`)) return;
+      if (!(await ask(`Delete “${n.name}”${its.length ? ` and the ${its.length} item(s) made from it` : ''}? This cannot be undone.`, { okText: 'Delete', danger: true }))) return;
       removeItems(its.map((i) => i.id)); S.notes = S.notes.filter((x) => x.id !== n.id); save(); render();
     },
-    reorganizeNote(el) {
+    async reorganizeNote(el) {
       if (busy()) return;
       const n = S.notes.find((x) => x.id === el.dataset.id); const its = S.items.filter((i) => i.noteId === n.id);
-      if (its.length && !window.confirm(`This removes the ${its.length} item(s) made from this note (also approved ones and their tasks) and organizes the note again. Continue?`)) return;
+      if (its.length && !(await ask(`This removes the ${its.length} item(s) made from this note (also approved ones and their tasks) and organizes the note again. Continue?`, { okText: 'Organize again', danger: true }))) return;
       removeItems(its.map((i) => i.id)); n.status = 'new'; save(); render(); organizeAll([n.id]);
     },
     organizeAll() { organizeAll(); },
     organizeNote(el) { organizeAll([el.dataset.id]); },
-    toggleSide() { S.settings.sidebar = S.settings.sidebar === 'hide' ? 'show' : 'hide'; applySide(); save(); paintTop(); },
+    toggleSide() {
+      if (narrow()) { UI.sideOpen = !UI.sideOpen; applySide(); return; } // phone: the menu opens over the page
+      S.settings.sidebar = S.settings.sidebar === 'hide' ? 'show' : 'hide'; applySide(); save(); paintTop();
+    },
+    closeSide() { UI.sideOpen = false; applySide(); },
     hideLive() { UI.hideLive = true; livePaint(); },
     stopRun() {
       RUN.stop = true; if (RUN.ctrl) RUN.ctrl.abort();
@@ -1096,21 +1281,21 @@
       if (RUN.manualReject) RUN.manualReject();
       closeModal(); toast('Stopping…');
     },
-    openItem(el, e) {
+    async openItem(el, e) {
       if (e) e.preventDefault();
       const it = S.items.find((i) => i.id === el.dataset.id); if (!it) return;
       if (it.status === 'pending') { toast('Not organized yet.'); return; }
-      if (!leaveEditor()) return;
+      const ok = leaveEditor(); if (ok !== true && !(await ok)) return;
       UI.view = it.status === 'review' ? 'review' : 'cat:' + it.cat; UI.focus = it.id; UI.search = ''; render();
     },
     approve(el) { const it = S.items.find((i) => i.id === el.dataset.id); it.status = 'approved'; it.updatedAt = Date.now(); save(); render(); },
-    approveAll() {
+    async approveAll() {
       let list = S.items.filter((i) => i.status === 'review'); if (UI.flaggedOnly) list = list.filter((i) => i.flags && i.flags.length);
       const warn = list.filter((i) => i.flags && i.flags.length).length;
-      if (!window.confirm(`Approve ${list.length} item(s)?${warn ? `\n${warn} of them have warnings.` : ''}`)) return;
+      if (!(await ask(`Approve ${list.length} item(s)?${warn ? `\n${warn} of them have warnings.` : ''}`, { okText: 'Approve' }))) return;
       list.forEach((i) => { i.status = 'approved'; i.updatedAt = Date.now(); }); save(); render();
     },
-    edit(el) { if (UI.editing === el.dataset.id) return; if (!leaveEditor()) return; UI.editing = el.dataset.id; UI.dirty = false; UI.draft = null; renderContent(); const ed = $('#editor'); if (ed) ed.scrollIntoView({ block: 'nearest' }); },
+    async edit(el) { if (UI.editing === el.dataset.id) return; const ok = leaveEditor(); if (ok !== true && !(await ok)) return; UI.editing = el.dataset.id; UI.dirty = false; UI.draft = null; renderContent(); const ed = $('#editor'); if (ed) ed.scrollIntoView({ block: 'nearest' }); },
     cancelEdit() { UI.editing = null; UI.dirty = false; UI.draft = null; renderContent(); },
     addTaskRow() { const tpl = $('#taskRowTpl'); $('#edTasks').appendChild(tpl.content.cloneNode(true)); UI.dirty = true; captureDraft(); },
     rmTaskRow(el) { el.closest('[data-taskrow]').remove(); UI.dirty = true; captureDraft(); },
@@ -1222,9 +1407,9 @@
     clearInstruction(el) { const n = S.notes.find((x) => x.id === el.dataset.id); if (n) { delete n.instruction; save(); renderContent(); } },
     newChat() { UI.chatId = 'new'; UI.chatDraft = ''; renderContent(); const t = $('#chatIn'); if (t) t.focus(); },
     openChat(el, e) { if (e && e.target.closest('[data-act=delChat]')) return; UI.chatId = el.dataset.id; renderContent(); },
-    delChat(el, e) {
+    async delChat(el, e) {
       if (e) e.stopPropagation(); if (busy()) return;
-      if (!window.confirm('Delete this chat? Things you chose to remember stay in Memory.')) return;
+      if (!(await ask('Delete this chat? Things you chose to remember stay in Memory.', { okText: 'Delete', danger: true }))) return;
       S.chats = S.chats.filter((c) => c.id !== el.dataset.id); if (UI.chatId === el.dataset.id) UI.chatId = null; save(); render();
     },
     chatExample(el) { const t = $('#chatIn'); if (t) { t.value = el.textContent; UI.chatDraft = t.value; t.focus(); } },
@@ -1243,7 +1428,12 @@
         const p = C.buildChatPrompt(prompt('chat'), S, history, text, ctx());
         let data; let thinking = '';
         if (S.settings.provider === 'manual') data = await askManual('Chat: your message for ChatGPT or Claude', p.system + '\n\n' + p.user);
-        else { const a = await aiJSON('chat', p.system, p.user, 'chat'); data = a.data; thinking = a.thinking; }
+        else {
+          UI.liveReply = '';
+          // Claude streams: show the "reply" part of its JSON answer while it is written
+          RUN.onText = (t) => { const r = C.partialReply(t); if (r) { UI.liveReply = r; const el = $('#liveReply'); if (el) { el.textContent = r; scrollChat(); } } };
+          const a = await aiJSON('chat', p.system, p.user, 'chat'); data = a.data; thinking = a.thinking;
+        }
         const acts = C.checkChatActions(data.actions, S, p.ids);
         out.text = String(data.reply || '').trim() || (acts.actions.length ? 'Here is what I suggest:' : '(no answer)');
         if (thinking) out.thinking = thinking.slice(0, 20000);
@@ -1255,7 +1445,7 @@
       } finally {
         out.at = Date.now();
         if (S.chats.includes(c)) { c.messages.push(out); if (c.messages.length > 500) c.messages.splice(0, c.messages.length - 500); c.updatedAt = Date.now(); }
-        RUN.active = false; RUN.chatId = null; save(); render();
+        RUN.active = false; RUN.chatId = null; RUN.onText = null; UI.liveReply = ''; save(); render();
       }
     },
     applyAction(el) {
@@ -1286,10 +1476,10 @@
     skipTeach() { UI.teach = null; renderContent(); },
     addMem() { S.memory.push({ id: C.uid('m'), text: 'New memory: edit me', at: Date.now(), source: 'manual' }); save(); renderContent(); const ins = $$('[data-mem]'); if (ins.length) { ins[ins.length - 1].focus(); ins[ins.length - 1].select(); } },
     delMem(el) { S.memory = S.memory.filter((m) => m.id !== el.dataset.id); save(); render(); },
-    deleteItem(el) { if (busy()) return; if (!window.confirm('Delete this item and its tasks? (Your original note stays in the Inbox.)')) return; removeItems([el.dataset.id]); save(); render(); },
+    async deleteItem(el) { if (busy()) return; if (!(await ask('Delete this item and its tasks? (Your original note stays in the Inbox.)', { okText: 'Delete', danger: true }))) return; removeItems([el.dataset.id]); save(); render(); },
     flaggedOnly(el) { UI.flaggedOnly = el.checked; renderContent(); },
     toggleTask(el) { const t = S.tasks.find((x) => x.id === el.dataset.id); t.done = el.checked; t.doneAt = t.done ? Date.now() : null; save(); render(); },
-    editTask(el) { const t = S.tasks.find((x) => x.id === el.dataset.id); const v = window.prompt('Task', t.text); if (v && v.trim()) { t.text = v.trim(); save(); renderContent(); } },
+    async editTask(el) { const t = S.tasks.find((x) => x.id === el.dataset.id); const v = await ask('Task', { input: t.text, okText: 'Save' }); if (v && v.trim() && S.tasks.includes(t)) { t.text = v.trim(); save(); renderContent(); } },
     deleteTask(el) { S.tasks = S.tasks.filter((t) => t.id !== el.dataset.id); save(); render(); },
     addTask(el) {
       const inp = $(`[data-newtask="${CSS.escape(el.dataset.cat)}"]`); const v = inp.value.trim(); if (!v) return;
@@ -1346,12 +1536,13 @@
       const id = C.safeName(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) + '-' + Math.random().toString(36).slice(2, 6);
       S.categories.push({ id, name, parent, desc: '', area: null }); save(); render(); toast('Category added.');
     },
-    delCat(el) {
+    async delCat(el) {
       if (busy()) return;
       const c = cat(el.dataset.id); if (!c || c.system) return;
       if (C.children(cats(), c.id).length) { toast('Delete or move its subcategories first.'); return; }
       const n = S.items.filter((i) => i.cat === c.id).length; const tn = S.tasks.filter((t) => t.cat === c.id).length;
-      if (!window.confirm(`Delete “${c.name}”?${n ? `\n${n} item(s) will move to Unsorted.` : ''}${tn ? `\n${tn} task(s) will move to Other tasks.` : ''}`)) return;
+      if (!(await ask(`Delete “${c.name}”?${n ? `\n${n} item(s) will move to Unsorted.` : ''}${tn ? `\n${tn} task(s) will move to Other tasks.` : ''}`, { okText: 'Delete', danger: true }))) return;
+      if (!cat(c.id)) return;
       S.items.forEach((i) => { if (i.cat === c.id) i.cat = 'unsorted'; i.tags = i.tags.filter((t) => t !== c.id); });
       S.tasks.forEach((t) => { if (t.cat === c.id) t.cat = 'todo'; });
       S.categories.forEach((x) => { if (x.area === c.id) x.area = null; });
@@ -1380,25 +1571,29 @@
     importJSON() { if (busy()) return; $('#importInput').click(); },
     downloadMD() { download(`mind-desk-${today()}.md`, C.allMarkdown(S), 'text/markdown'); },
     recoveryDownload() { const r = UI.recovery; if (!r) return; const o = JSON.parse(JSON.stringify(r.state)); if (o.settings) delete o.settings.oaKey; o.app = 'mind-desk'; download(`mind-desk-unsaved-copy-${today()}.json`, JSON.stringify(o, null, 1), 'application/json'); },
-    recoveryRestore() {
+    async recoveryRestore() {
       if (busy()) return; const r = UI.recovery; if (!r) return;
       const o = Object.assign({ app: 'mind-desk' }, JSON.parse(JSON.stringify(r.state))); const problem = C.backupProblem(o);
       if (problem) { showError(new Error('That copy cannot be used: ' + problem)); return; }
-      if (!window.confirm(`Replace everything here with the unsaved copy from ${fmtTime(r.at)}?\nChanges made here since then will be lost (download a backup first if unsure).`)) return;
+      if (!(await ask(`Replace everything here with the unsaved copy from ${fmtTime(r.at)}?\nChanges made here since then will be lost (download a backup first if unsure).`, { okText: 'Replace', danger: true }))) return;
       S = migrate(o); UI.recovery = null; store.del('recovery'); applyTheme(); UI.view = 'inbox'; save(); render(); paintNotice(); toast('The unsaved copy is back.');
     },
-    async recoveryDismiss() { if (!window.confirm('Delete the unsaved copy from the other window? It cannot be brought back.')) return; await store.del('recovery'); UI.recovery = null; paintNotice(); },
-    deleteAll() {
+    async recoveryDismiss() { if (!(await ask('Delete the unsaved copy from the other window? It cannot be brought back.', { okText: 'Delete', danger: true }))) return; await store.del('recovery'); UI.recovery = null; paintNotice(); },
+    async deleteAll() {
       if (busy()) return;
-      if (!window.confirm('Delete ALL notes, items, tasks, words and settings in Mind Desk?\nMake a backup first if you are not sure.')) return;
-      if (window.prompt('Type DELETE to confirm') !== 'DELETE') return;
+      if (!(await ask('Delete ALL notes, items, tasks, words and settings in Mind Desk?\nMake a backup first if you are not sure.', { okText: 'Continue', danger: true }))) return;
+      if ((await ask('Type DELETE to confirm', { input: '', okText: 'Delete everything', danger: true })) !== 'DELETE') return;
+      if (RUN.active) return;
       S = defaultState(); UI.view = 'inbox'; save(); render(); toast('Everything deleted.');
     },
   };
+  /** true right away when nothing is unsaved; otherwise a promise of the person's answer */
   function leaveEditor() {
     if (!UI.editing || !UI.dirty) return true;
-    if (!window.confirm('You have changes in the editor that are not saved. Leave without saving them?')) return false;
-    UI.editing = null; UI.dirty = false; UI.draft = null; return true;
+    return ask('You have changes in the editor that are not saved. Leave without saving them?', { okText: 'Leave without saving', danger: true }).then((yes) => {
+      if (!yes) return false;
+      UI.editing = null; UI.dirty = false; UI.draft = null; return true;
+    });
   }
   function setConn(html) { UI.connResult = html; const el = $('#connResult'); if (el) el.innerHTML = html; }
   function removeItems(ids) {
@@ -1410,9 +1605,11 @@
     if (RUN.surveyWait) { RUN.surveyWait.resolve(); UI.view = 'inbox'; } else { UI.view = 'inbox'; toast('Saved. Press “Organize all” to continue.'); }
     render();
   }
-  function applySide() { const app = $('.app'); if (app) app.classList.toggle('noside', S.settings.sidebar === 'hide'); }
+  const narrow = () => window.matchMedia && window.matchMedia('(max-width: 820px)').matches;
+  function applySide() { const app = $('.app'); if (app) { app.classList.toggle('noside', S.settings.sidebar === 'hide'); app.classList.toggle('sideopen', !!UI.sideOpen); } }
   function applyTheme() {
     applySide();
+    if (ART) return; // the artifact follows the viewer's own light/dark setting (claude.ai sets it on the page)
     const t = S.settings.theme; if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
   }
 
@@ -1481,7 +1678,8 @@
       const problem = C.backupProblem(o);
       if (problem) throw new Error('This backup cannot be restored. Nothing was changed.\n\n' + problem);
       if (RUN.active) throw new Error('Please wait until the AI run has finished.');
-      if (!window.confirm(`Restore this backup from ${o.exportedAt ? fmtTime(o.exportedAt) : 'an unknown date'}?\nIt REPLACES everything in Mind Desk now (${o.notes.length} notes, ${o.items.length} items).\nYour AI connection settings on this PC stay as they are.`)) return;
+      if (!(await ask(`Restore this backup from ${o.exportedAt ? fmtTime(o.exportedAt) : 'an unknown date'}?\nIt REPLACES everything in Mind Desk now (${o.notes.length} notes, ${o.items.length} items).\n${ART ? 'Your notes stay private in this artifact.' : 'Your AI connection settings on this PC stay as they are.'}`, { okText: 'Restore', danger: true }))) return;
+      if (RUN.active) throw new Error('Please wait until the AI run has finished.');
       const keep = {}; for (const k of CONNECTION) keep[k] = S.settings[k];
       const next = migrate(o); Object.assign(next.settings, keep);
       delete next.exportedAt; delete next.version; next.folderFiles = []; next.folderOriginals = [];
@@ -1510,11 +1708,11 @@
     }
     RUN.stop = true; if (RUN.ctrl) RUN.ctrl.abort(); if (RUN.manualReject) RUN.manualReject(); if (RUN.surveyWait) RUN.surveyWait.reject(abortErr());
     const text = reason === 'changed'
-      ? 'Your notes were changed in another Mind Desk window. To avoid overwriting them, this window stopped saving.'
+      ? (ART ? 'Your notes were changed in Mind Desk on another device or in another tab. To avoid overwriting them, this page stopped saving. Load the newest version to carry on here.' : 'Your notes were changed in another Mind Desk window. To avoid overwriting them, this window stopped saving.')
       : 'Mind Desk is open in another window or tab. Only one window can work at a time, so nothing gets overwritten.';
     const o = screen(`<h2>Mind Desk is open somewhere else</h2><p>${text}</p>
       ${unsaved ? '<p class="banner">This window had changes that were not saved yet. A copy was kept: the other window offers it, or download it here.</p>' : ''}
-      <div class="actions"><button class="btn primary" id="takeOver">Use Mind Desk here</button>${S ? '<button class="btn" id="dlCopy">Download this window’s copy</button>' : ''}</div>
+      <div class="actions"><button class="btn primary" id="takeOver">${ART && reason === 'changed' ? 'Load the newest version' : 'Use Mind Desk here'}</button>${S ? '<button class="btn" id="dlCopy">Download this window’s copy</button>' : ''}</div>
       <p class="muted small">The other window will then stop and show this message.</p>`, 'data-blocked');
     $('#takeOver', o).onclick = takeOver;
     if ($('#dlCopy', o)) $('#dlCopy', o).onclick = () => download(`mind-desk-window-copy-${today()}.json`, JSON.stringify(exportObj(), null, 1), 'application/json');
@@ -1566,7 +1764,13 @@
   }
   let wired = false;
   async function start() {
-    window.MD = { get state() { return S; }, ACT, organizeAll, render, save, store, RUN, UI, FOLDER, LIFE, syncFolder, VERSION };
+    window.MD = { get state() { return S; }, ACT, organizeAll, render, save, store, RUN, UI, FOLDER, LIFE, syncFolder, VERSION, TARGET, ask };
+    if (ART) {
+      await PLAT.init(); // asks claude.ai for storage, Claude and downloads (each may be missing)
+      // another device or tab saved newer notes: stop saving here (the same protection as two windows on the PC)
+      PLAT.onRemoteChange = () => { if (LIFE.ok && !LIFE.blocked) blockWindow('changed'); };
+      PLAT.knownRev = () => LIFE.rev;
+    }
     await store.open();
     if (store.failed) { fatal('Could not open your saved notes', 'The browser storage could not be opened (' + store.failed + ').'); return; }
     if (!(await tryLock(false))) { blockWindow('other'); return; }

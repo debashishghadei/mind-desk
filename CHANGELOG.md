@@ -2,6 +2,23 @@
 
 All notable changes to Mind Desk. Versions follow semantic versioning.
 
+## 1.2.0 — 2026-10-22
+
+**Mind Desk as a Claude artifact** (second build from the same source; the PC version works as before).
+
+- New file `mind-desk-artifact.html`, published on claude.ai as the artifact “Mind Desk”. It has the features of the PC version: Inbox (paste, add files, drag and drop), Organize all / Organize this note, questions, Review with the before/after view, Ask AI again (Fast / Careful), Edit with `---` splits, Fix my typing, To-do, categories, Memory & words, Chat with Apply/Cancel and Remember, Report for Claude, prompts, backup / restore / Markdown.
+- **Claude answers with your own Claude plan** (no API key, no extra cost beyond your plan’s usage). ⚡ Fast = Claude’s quick model, 🧠 Careful = Claude’s main model (it thinks first; its thinking is not shown). The first use asks you to allow it.
+- Steps go to Claude in batches: splitting and questions in parts of about 30,000 characters, organizing about 15 notes (max ~12,000 characters) per request. A part that fails twice is redone note by note. Answers with a changed number, a lost “not” or lost words are asked again on their own, stricter (as on the PC).
+- Chat replies appear while Claude writes them.
+- Clear messages when Claude is not allowed, the usage limit is reached, or the sign-in expired; the run stops instead of retrying, nothing is lost. Stop ends a running answer at once.
+- **Notes are saved in the artifact’s private storage** on your Claude account (only you can read them, also when the artifact is shared). Open the same artifact on the phone or another computer to see the same notes. If another device or tab saves newer notes, the page stops saving and offers “Load the newest version” (like two windows on the PC). Without that storage (signed out, preview) notes are kept in the browser and the bottom of the menu says so.
+- Download backup / Markdown / reports ask before saving the file. A backup from the PC version can be restored in the artifact (and back).
+- Questions like “Delete this note?” are shown inside the page (artifacts cannot show browser dialogs). The PC version keeps the browser’s dialogs.
+- Works at phone width: ☰ opens the menu over the page; the top bar wraps. Light/dark follows claude.ai.
+- Not in the artifact (they cannot work there): Ollama / other local AI / copy & paste settings, saving to a folder, the Theme setting.
+
+PC version (`mind-desk.html`): no change in behaviour. Small extras: on a narrow window ☰ opens the menu over the page; per-note instructions from the chat also reach the copy & paste prompts.
+
 ## 1.1.0 — 2026-10-22
 
 **Chat + Memory.**
