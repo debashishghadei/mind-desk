@@ -46,14 +46,15 @@ function start(port, opts = {}) {
     }
     if (req.url === '/__log') return reply(res, 200, state.log, origin, true);
     if (req.url === '/__reset') { state.log = []; state.counts = {}; return reply(res, 200, { ok: 1 }, origin, true); }
-    if (req.url === '/api/tags') return reply(res, 200, { models: (opts.models || ['qwen3:8b', 'llama3.2:3b']).map((n) => ({ name: n })) }, origin, allowAll);
+    if (req.url === '/api/tags') return reply(res, 200, { models: (opts.models || ['qwen3.5:9b', 'qwen3:8b', 'llama3.2:3b', 'nothink:1b']).map((n) => ({ name: n })) }, origin, allowAll);
     if (req.url === '/api/chat' && req.method === 'POST') {
       let body = '';
       req.on('data', (c) => { body += c; });
       req.on('end', async () => {
         const j = JSON.parse(body); const sys = j.messages[0].content; const user = j.messages[1].content;
         state.log.push({ model: j.model, think: j.think, format: !!j.format, options: j.options, system: sys, user });
-        if (!(opts.models || ['qwen3:8b', 'llama3.2:3b']).includes(j.model)) return reply(res, 404, { error: `model "${j.model}" not found, try pulling it first` }, origin, allowAll);
+        if (j.model === 'nothink:1b' && 'think' in j) return reply(res, 400, { error: `"nothink:1b" does not support thinking` }, origin, allowAll);
+        if (!(opts.models || ['qwen3.5:9b', 'qwen3:8b', 'llama3.2:3b', 'nothink:1b']).includes(j.model)) return reply(res, 404, { error: `model "${j.model}" not found, try pulling it first` }, origin, allowAll);
         if (/SLOW/.test(user)) await new Promise((r) => setTimeout(r, 1500));
         let out;
         if (/Decide where each NEW separate item starts/.test(sys)) {
@@ -75,7 +76,10 @@ function start(port, opts = {}) {
           if (/BADWORD/.test(note)) text = text.replace(/IGS/g, 'eggs');
           out = { title: (text.split(/\s+/).slice(0, 5).join(' ') || 'Note').replace(/[^\w ]/g, ''), category: pickCat(note), tags: /\bsite\b/i.test(note) && /\bmind\b/i.test(note) ? ['biz-sites'] : [], tasks: tasksOf(note), text };
         }
-        reply(res, 200, { model: j.model, message: { role: 'assistant', content: JSON.stringify(out) }, done: true }, origin, allowAll);
+        const msg = { role: 'assistant', content: JSON.stringify(out) };
+        if (j.think === true) msg.thinking = 'THINKING: the person wrote ' + user.replace(/\s+/g, ' ').slice(-80);
+        if (/TAGTHINK/.test(user)) msg.content = '<think>INLINE THOUGHTS here</think>\n' + msg.content;
+        reply(res, 200, { model: j.model, message: msg, done: true }, origin, allowAll);
       });
       return;
     }

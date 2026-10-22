@@ -58,7 +58,8 @@
 
   function defaultSettings() {
     return {
-      provider: 'ollama', ollamaUrl: 'http://localhost:11434', model: 'qwen3:8b', think: false, numCtx: 8192, temperature: 0.2, timeoutSec: 300,
+      provider: 'ollama', ollamaUrl: 'http://localhost:11434', model: 'qwen3.5:9b', numCtx: 8192, temperature: 0.2, timeoutSec: 300,
+      mode: 'fast', thinkSplit: true, thinkSurvey: true, thinkOrganize: true, // Careful mode: which steps let the AI think first
       oaUrl: 'http://localhost:3001/api/v1/openai', oaKey: '', oaModel: '', manualBatch: 20, survey: true, surveyMax: 8, theme: 'auto',
     };
   }
@@ -73,6 +74,8 @@
     const d = defaultState();
     const out = Object.assign({}, d, s || {});
     out.settings = Object.assign(defaultSettings(), (s && s.settings) || {});
+    if ('think' in out.settings) { if (out.settings.think === true && !(s.settings && s.settings.mode)) out.settings.mode = 'careful'; delete out.settings.think; } // 1.0.2 had one on/off switch
+    if (!['fast', 'careful'].includes(out.settings.mode)) out.settings.mode = 'fast';
     out.prompts = Object.assign({ split: null, survey: null, organize: null }, (s && s.prompts) || {});
     for (const k of ['notes', 'items', 'tasks', 'words', 'rules', 'folderFiles', 'folderOriginals']) if (!Array.isArray(out[k])) out[k] = [];
     if (!Array.isArray(out.categories) || !out.categories.length) out.categories = C.defaultCategories();
@@ -162,6 +165,11 @@
     taskcheck: ['warn', 'A task may not match your note. Check the tasks.'],
     splitguess: ['warn', 'Your original text was divided approximately (very long note). Check “Show my original”.'],
   };
+  /** the AI's thinking, folded away by default */
+  function thinkBox(text, label) {
+    if (!text) return '';
+    return `<details class="think"><summary>${esc(label || 'Show AI’s thinking')}</summary><div class="pre">${esc(text)}</div></details>`;
+  }
   function flagChips(it) {
     const sv = it.surveyFailed ? `<span class="chip warn">The questions step failed for this note, so its shortcodes were not checked</span> <button class="btn small" data-act="resurvey" data-id="${esc(it.id)}">Ask questions again</button> ` : '';
     return sv + (it.flags || []).map((f) => {
@@ -206,39 +214,52 @@
   /* ================= AI providers ================= */
   function connError(where) { const e = new Error(`Mind Desk could not reach the AI at ${where}.`); e.conn = true; return e; }
 
-  async function withTimeout(fn) {
+  async function withTimeout(fn, factor = 1) {
     const ctrl = new AbortController(); RUN.ctrl = ctrl; let timedOut = false;
-    const t = setTimeout(() => { timedOut = true; ctrl.abort(); }, (+S.settings.timeoutSec || 300) * 1000);
+    const secs = (+S.settings.timeoutSec || 300) * factor;
+    const t = setTimeout(() => { timedOut = true; ctrl.abort(); }, secs * 1000);
     try { return await fn(ctrl.signal); } catch (e) {
-      if (timedOut) throw new Error(`The AI took longer than ${S.settings.timeoutSec} seconds and was stopped. A smaller model or a bigger time limit (Settings) can help.`);
+      if (timedOut) throw new Error(`The AI took longer than ${secs} seconds and was stopped. Fast mode, a smaller model or a bigger time limit (Settings) can help.`);
       throw e;
     } finally { clearTimeout(t); if (RUN.ctrl === ctrl) RUN.ctrl = null; }
   }
 
   /** context size big enough for prompt + answer (organize answers are as long as the note) */
-  function ctxSize(system, user, outFactor) {
-    const need = Math.ceil((system.length + user.length * (1 + outFactor)) / 3.2) + 768;
+  function ctxSize(system, user, outFactor, thinking) {
+    const need = Math.ceil((system.length + user.length * (1 + outFactor)) / 3.2) + 768 + (thinking ? 4096 : 0); // room for the AI's thinking
     if (need > 32768) { const e = new Error(`This item is too long for the AI in one go (about ${Math.round(user.length / 6).toLocaleString()} words). Open it, use Edit and put --- lines to split it, then press “Ask AI again”.`); e.tooLong = true; throw e; }
     return Math.max(+S.settings.numCtx || 8192, Math.ceil(need / 1024) * 1024);
   }
-  async function ollamaChat(system, user, schema, outFactor = 1) {
+  /** some models write their thinking inside <think> tags in the answer: move it out */
+  function splitThink(content, thinking) {
+    let th = thinking || '';
+    const c = String(content || '').replace(/<think>([\s\S]*?)<\/think>/gi, (m, x) => { th += (th ? '\n' : '') + x.trim(); return ''; }).trim();
+    return { content: c, thinking: th.trim().slice(0, 20000) };
+  }
+  const NO_THINK_SWITCH = new Set();
+  async function ollamaChat(system, user, schema, outFactor = 1, think = false) {
     const s = S.settings; const base = s.ollamaUrl.replace(/\/+$/, '');
-    const body = { model: s.model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], stream: false, options: { temperature: +s.temperature, num_ctx: ctxSize(system, user, outFactor) }, keep_alive: '10m' };
-    if (schema) body.format = schema;
-    if (!s.think) body.think = false;
+    const body = { model: s.model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], stream: false, options: { temperature: +s.temperature, num_ctx: ctxSize(system, user, outFactor, think) }, keep_alive: '10m' };
+    // Careful: the AI thinks first (thinking comes back separately). The JSON shape is then asked for in words only,
+    // because a fixed JSON format can stop some models from thinking.
+    const plain = NO_THINK_SWITCH.has(s.model); // this model rejected the thinking switch earlier: ask normally
+    if (plain) { if (schema) body.format = schema; } else if (think) body.think = true; else { body.think = false; if (schema) body.format = schema; }
     return withTimeout(async (signal) => {
       for (let attempt = 0; attempt < 2; attempt++) {
         let r;
         try { r = await fetch(base + '/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }); } catch (e) { if (e.name === 'AbortError') throw e; throw connError(base); }
-        if (r.ok) { const j = await r.json(); return (j.message && j.message.content) || ''; }
+        if (r.ok) { const j = await r.json(); const m = j.message || {}; return splitThink(m.content, m.thinking); }
         const t = await r.text();
-        if ('think' in body && /think/i.test(t)) { delete body.think; continue; }
+        if ('think' in body && /think/i.test(t)) { // this model cannot switch thinking on/off: just ask normally
+          if (body.think && schema) body.format = schema;
+          delete body.think; NO_THINK_SWITCH.add(s.model); continue;
+        }
         if (r.status === 404 && /model/i.test(t)) throw new Error(`The model “${s.model}” is not installed in Ollama.\nOpen Command Prompt and run:  ollama pull ${s.model}\n(or choose an installed model in Settings).`);
         if (r.status === 403) throw connError(base);
         throw new Error('Ollama answered with an error ' + r.status + ': ' + t.slice(0, 300));
       }
       throw new Error('Ollama could not run the request.');
-    });
+    }, think ? 2 : 1);
   }
   async function openaiChat(system, user) {
     const s = S.settings; const base = s.oaUrl.replace(/\/+$/, '');
@@ -248,16 +269,21 @@
       try { r = await fetch(base + '/chat/completions', { method: 'POST', headers, signal, body: JSON.stringify({ model: s.oaModel, temperature: +s.temperature, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }) }); } catch (e) { if (e.name === 'AbortError') throw e; throw connError(base); }
       const t = await r.text();
       if (!r.ok) throw new Error('The AI answered with an error ' + r.status + ': ' + t.slice(0, 300));
-      const j = JSON.parse(t); return (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
+      const j = JSON.parse(t); const m = (j.choices && j.choices[0] && j.choices[0].message) || {};
+      return splitThink(m.content, m.reasoning_content || m.reasoning || '');
     });
   }
-  /** one AI request that must return JSON; tries twice */
+  const STEP_KEY = { split: 'thinkSplit', survey: 'thinkSurvey', organize: 'thinkOrganize' };
+  /** does this step think in the current run? (Careful mode and the step is ticked in Settings) */
+  const thinks = (step) => RUN.mode === 'careful' && S.settings[STEP_KEY[step]] !== false;
+  /** one AI request that must return JSON; tries twice. Returns {data, thinking} */
   async function aiJSON(step, system, user) {
-    let last;
+    let last; let thinking = '';
     for (let attempt = 0; attempt < 2; attempt++) {
       if (RUN.stop) throw abortErr();
-      const raw = S.settings.provider === 'openai' ? await openaiChat(system, user) : await ollamaChat(system, user, C.SCHEMAS[step], step === 'organize' ? 1 : 0.2);
-      try { return C.parseJSON(raw); } catch (e) { last = e; }
+      const r = S.settings.provider === 'openai' ? await openaiChat(system, user) : await ollamaChat(system, user, C.SCHEMAS[step], step === 'organize' ? 1 : 0.2, thinks(step));
+      if (r.thinking) thinking += (thinking ? '\n\n— second try —\n' : '') + r.thinking;
+      try { return { data: C.parseJSON(r.content), thinking }; } catch (e) { last = e; }
     }
     throw last;
   }
@@ -313,16 +339,18 @@
     const blocks = C.makeBlocks(note.text, true);
     if (!blocks.length) { note.status = 'split'; return; }
     if (blocks.length === 1) { addItemsFromGroups(note, blocks, [[0]]); return; }
-    const groups = [];
+    const groups = []; const thoughts = [];
     for (const win of C.blockWindows(blocks)) {
       if (win.length === 1) { groups.push(win); continue; }
       let starts;
       try {
         const p = C.buildSplitPrompt(prompt('split'), blocks, win);
-        starts = (await aiJSON('split', p.system, p.user)).starts;
+        const a = await aiJSON('split', p.system, p.user); starts = a.data.starts;
+        if (a.thinking) thoughts.push(a.thinking);
       } catch (e) { if (e.name === 'AbortError' || e.conn) throw e; starts = win.map((_, k) => k + 1); }
       for (const g of C.groupsFromStarts(win.length, starts, hardStarts(blocks, win))) groups.push(g.map((k) => win[k]));
     }
+    note.splitThinking = thoughts.join('\n\n').slice(0, 20000) || undefined;
     addItemsFromGroups(note, blocks, groups);
   }
 
@@ -356,21 +384,26 @@
       }
     }
     push();
-    let all = []; const failed = new Set();
+    let all = []; const failed = new Set(); const thoughts = [];
     for (let i = 0; i < chunks.length; i++) {
       setProgress('Reading your notes for questions', i, chunks.length);
       try {
         if (manual) all = all.concat((await askManual(`Step 2 of 3: questions about your notes${chunks.length > 1 ? ` (part ${i + 1} of ${chunks.length})` : ''}`, C.bulkSurveyPrompt(prompt('survey'), chunks[i].text, ctx()))).questions || []);
-        else { const p = C.buildSurveyPrompt(prompt('survey'), chunks[i].text, ctx()); all = all.concat((await aiJSON('survey', p.system, p.user)).questions || []); }
+        else {
+          const p = C.buildSurveyPrompt(prompt('survey'), chunks[i].text, ctx()); const a = await aiJSON('survey', p.system, p.user);
+          all = all.concat(a.data.questions || []); if (a.thinking) thoughts.push(a.thinking);
+        }
       } catch (e) { if (e.name === 'AbortError' || e.conn) throw e; chunks[i].items.forEach((it) => failed.add(it)); }
     }
     for (const it of items) it.surveyFailed = failed.has(it);
     if (failed.size) toast(`The questions step failed for ${failed.size} note(s) (the AI answer was not usable). They are marked in Review.`, 7000);
+    RUN.surveyThinking = thoughts.join('\n\n').slice(0, 20000);
     return C.checkSurvey(all, ctx());
   }
 
-  function applyResult(it, chk) {
+  function applyResult(it, chk, thinking) {
     if (!alive(it)) return; // deleted or replaced meanwhile: drop the answer
+    it.thinking = thinking ? String(thinking).slice(0, 20000) : undefined; it.mode = RUN.mode || 'fast';
     it.title = chk.title; it.cat = chk.category; it.tags = chk.tags; it.text = chk.text; it.flags = chk.flags; it.lost = chk.lost; it.error = '';
     it.status = 'review'; it.updatedAt = Date.now();
     S.tasks = S.tasks.filter((t) => t.itemId !== it.id).concat(chk.tasks.map((t) => ({ id: C.uid('t'), itemId: it.id, text: t.text, done: t.done, cat: t.cat, createdAt: it.createdAt })));
@@ -383,16 +416,18 @@
   const SERIOUS = ['shortened', 'lostword', 'bigchange', 'numbers', 'negation'];
   async function organizeOne(it) {
     const c = ctx(); const p = C.buildOrganizePrompt(prompt('organize'), it.original, c);
-    let chk = C.checkOrganize(await aiJSON('organize', p.system, p.user), it.original, c);
+    const a1 = await aiJSON('organize', p.system, p.user);
+    let chk = C.checkOrganize(a1.data, it.original, c); let thinking = a1.thinking;
     if (chk.flags.some((f) => SERIOUS.includes(f))) {
       const strict = p.system + '\n\nIMPORTANT: a previous answer changed or removed words. Return the note with ONLY typo fixes. Every other word must stay exactly the same.';
       try {
-        const chk2 = C.checkOrganize(await aiJSON('organize', strict, p.user), it.original, c);
+        const a2 = await aiJSON('organize', strict, p.user);
+        const chk2 = C.checkOrganize(a2.data, it.original, c);
         const bad = (x) => x.flags.filter((f) => SERIOUS.includes(f)).length;
-        if (bad(chk2) <= bad(chk)) chk = chk2;
+        if (bad(chk2) <= bad(chk)) { chk = chk2; thinking = a2.thinking ? (a1.thinking ? a1.thinking + '\n\n— asked again, stricter —\n' : '') + a2.thinking : thinking; }
       } catch (e) { if (e.name === 'AbortError' || e.conn) throw e; }
     }
-    applyResult(it, chk);
+    applyResult(it, chk, thinking);
   }
   async function organizeManual(items) {
     const size = Math.max(1, +S.settings.manualBatch || 20); const parts = Math.ceil(items.length / size); let missing = 0;
@@ -417,7 +452,7 @@
     if (!S.notes.some((n) => n.status === 'new') && !S.items.some((i) => i.status === 'pending')) { toast('Nothing new to organize. Add notes first.'); return; }
     const warn = remoteWarning().filter((w) => !/Copy & paste/.test(w));
     if (warn.length && !window.confirm(warn.join('\n') + '\n\nContinue?')) return;
-    RUN.active = true; RUN.stop = false; paintTop();
+    RUN.active = true; RUN.stop = false; RUN.mode = S.settings.mode; paintTop();
     try {
       const fresh = S.notes.filter((n) => n.status === 'new');
       if (fresh.length) {
@@ -439,7 +474,7 @@
         const qs = await runSurvey(unsurveyed);
         unsurveyed.forEach((i) => { i.surveyed = true; }); save();
         if (qs.length) {
-          S.survey = { questions: qs, createdAt: Date.now() }; save();
+          S.survey = { questions: qs, createdAt: Date.now() }; if (RUN.surveyThinking) S.survey.thinking = RUN.surveyThinking; save();
           UI.view = 'survey'; render(); setProgress('Waiting for your answers', 0, 0);
           await waitSurvey();
         }
@@ -585,6 +620,8 @@
     $('#top').innerHTML = `<h1>${esc(viewTitle())}</h1>
       ${searchable ? `<input type="search" id="search" placeholder="Search…" value="${esc(UI.search)}" aria-label="Search">` : ''}
       <div class="grow"></div><div class="progress" id="progress"></div>
+      ${S.settings.provider === 'manual' ? '' : `<select id="modeSel" data-set="mode" aria-label="Fast or careful" ${RUN.active ? 'disabled' : ''} title="Fast: quick answers. Careful: the AI thinks first (slower, better at understanding what you meant).">
+        <option value="fast"${S.settings.mode === 'fast' ? ' selected' : ''}>⚡ Fast</option><option value="careful"${S.settings.mode === 'careful' ? ' selected' : ''}>🧠 Careful</option></select>`}
       <button class="btn primary" data-act="organizeAll" ${RUN.active ? 'disabled' : ''} title="Split, ask questions and organize all new notes">✨ Organize all${pendingWork ? ` (${pendingWork})` : ''}</button>`;
     if (RUN.active) setProgress(RUN.label, RUN.done, RUN.total);
   }
@@ -622,7 +659,7 @@
           ${n.status !== 'new' ? `<button class="btn small" data-act="reorganizeNote" data-id="${esc(n.id)}">Organize again</button>` : ''}
           <button class="btn small danger" data-act="deleteNote" data-id="${esc(n.id)}">Delete</button></div>
         <div class="muted small" style="margin-bottom:8px">Added ${esc(fmtTime(n.addedAt))} · ${n.text.length.toLocaleString()} characters · ${n.source === 'file' ? 'from a file' : 'pasted'}</div>
-        <div class="notebody pre">${esc(n.text)}</div>`;
+        <div class="notebody pre">${esc(n.text)}</div>${thinkBox(n.splitThinking, 'Show how the AI decided to split this note')}`;
       const st = { pending: '<span class="chip warn">Waiting</span>', review: '<span class="chip warn">To review</span>', approved: '<span class="chip good">Done</span>' };
       right = `<h2 style="font-size:15px;margin:0 0 10px">What the AI made</h2>` + (its.length ? its.map((i) => `<div class="mini" data-act="openItem" data-id="${esc(i.id)}">
           <div class="t">${esc(i.title || i.original.slice(0, 60))}</div><div class="row small" style="margin-top:4px">${st[i.status] || ''}${i.status !== 'pending' ? `<span class="muted">${esc(C.catPath(cats(), i.cat))}</span>` : ''}</div></div>`).join('')
@@ -681,16 +718,16 @@
       if (UI.editing === it.id) { h += editorHtml(it); continue; }
       const d = diffHtml(it.original, it.text); const n = noteOf(it); const prev = prevInNote(it);
       h += `<div class="card" data-item="${esc(it.id)}">
-        <div class="itemhead"><div class="grow"><h3>${esc(it.title)}</h3><div class="meta">${esc(n ? n.name : '')} · ${esc(C.fmtDate(it.createdAt))}</div></div>
+        <div class="itemhead"><div class="grow"><h3>${esc(it.title)}</h3><div class="meta">${esc(n ? n.name : '')} · ${esc(C.fmtDate(it.createdAt))}${it.mode === 'careful' ? ' · 🧠 careful' : ''}</div></div>
           <select data-change="setCat" data-id="${esc(it.id)}" aria-label="Category">${catOptions(it.cat)}</select></div>
         <div class="row" style="margin-top:6px">${it.tags.map((t) => `<span class="chip acc">also: ${esc(C.catPath(cats(), t))}</span>`).join(' ')} ${flagChips(it)}</div>
         <div class="cmp"><div><div class="lbl">Your original</div><div class="pre">${d.left}</div></div><div><div class="lbl">Cleaned by AI</div><div class="pre">${d.right}</div></div></div>
-        ${tasksPreview(it)}
+        ${tasksPreview(it)}${thinkBox(it.thinking)}
         <div class="actions"><button class="btn primary" data-act="approve" data-id="${esc(it.id)}">✓ Approve</button>
           <button class="btn" data-act="edit" data-id="${esc(it.id)}">Edit</button>
           ${it.text !== it.original ? `<button class="btn" data-act="useOriginal" data-id="${esc(it.id)}">Use my original text</button>` : ''}
           ${prev ? `<button class="btn" data-act="mergePrev" data-id="${esc(it.id)}" title="Join with the item above from the same note">Join with previous</button>` : ''}
-          ${S.settings.provider !== 'manual' ? `<button class="btn" data-act="rerun" data-id="${esc(it.id)}">Ask AI again</button>` : ''}
+          ${S.settings.provider !== 'manual' ? `<span class="btngroup" role="group" aria-label="Ask AI again"><span class="lbl">Ask AI again:</span><button class="btn" data-act="rerun" data-mode="fast" data-id="${esc(it.id)}" title="Quick answer">⚡ Fast</button><button class="btn" data-act="rerun" data-mode="careful" data-id="${esc(it.id)}" title="The AI thinks first (slower)">🧠 Careful</button></span>` : ''}
           <button class="btn danger" data-act="deleteItem" data-id="${esc(it.id)}">Delete</button></div></div>`;
     }
     return h;
@@ -709,6 +746,7 @@
     : `<div class="q"><div class="quote">“${esc(q.quote)}”</div><label for="sq${k}"><b>${esc(q.question)}</b></label>
           <div class="row" style="margin-top:6px"><input type="text" id="sq${k}" data-q="${esc(q.id)}" value="${esc(draft[q.id] || '')}" style="flex:1;min-width:240px" placeholder="${esc(q.guess ? 'AI guess: ' + q.guess : 'Your answer')}">
           ${q.guess ? `<button class="btn small" data-act="useGuess" data-k="${k}">Use the guess</button>` : ''}</div></div>`).join('')}
+      ${thinkBox(S.survey.thinking, 'Show what the AI thought while reading your notes')}
       <div class="actions"><button class="btn primary" data-act="submitSurvey">Save answers and continue</button><button class="btn" data-act="skipSurvey">Skip questions</button></div>`;
   }
 
@@ -745,7 +783,7 @@
         <div class="meta">${esc(C.fmtDate(it.createdAt))}${n ? ' · ' + esc(n.name) : ''} · ${esc(C.catPath(cats(), it.cat))}${it.tags.length ? ' · also: ' + esc(it.tags.map((t) => C.catPath(cats(), t)).join(', ')) : ''}</div></div>
         <button class="btn small" data-act="edit" data-id="${esc(it.id)}">Edit</button><button class="btn small danger" data-act="deleteItem" data-id="${esc(it.id)}">Delete</button></div>
       <div class="pre" style="margin-top:8px">${esc(it.text)}</div>${tasksPreview(it)}
-      ${it.text !== it.original ? `<details style="margin-top:8px"><summary class="small">Show my original</summary><div class="pre muted" style="margin-top:6px">${esc(it.original)}</div></details>` : ''}</div>`;
+      ${it.text !== it.original ? `<details style="margin-top:8px"><summary class="small">Show my original</summary><div class="pre muted" style="margin-top:6px">${esc(it.original)}</div></details>` : ''}${thinkBox(it.thinking)}</div>`;
   }
   function viewCategory(id) {
     const c = cat(id); const q = UI.search.toLowerCase();
@@ -787,7 +825,7 @@
       ai += `<div class="grid2">${sField('ollamaUrl', 'Ollama address')}<div class="field"><label for="set-model">Model</label><input type="text" id="set-model" data-set="model" value="${esc(s.model)}" list="modelList"><datalist id="modelList"></datalist></div></div>
         <div class="row"><button class="btn" data-act="testConn">Test connection</button><button class="btn" data-act="testAI">Try a quick test note</button></div>
         <div id="connResult" style="margin-top:10px">${UI.connResult}</div>
-        <details style="margin-top:12px"><summary>More options</summary><div class="grid2" style="margin-top:8px">${sField('numCtx', 'Context size (tokens)', 'number', 'min="2048" step="1024"')}${sField('temperature', 'Temperature (0 = strict)', 'number', 'min="0" max="1" step="0.1"')}${sField('timeoutSec', 'Time limit per request (seconds)', 'number', 'min="30"')}</div>${sField('think', 'Let the model “think” first (slower; off is recommended)', 'checkbox')}</details>
+        <details style="margin-top:12px"><summary>More options</summary><div class="grid2" style="margin-top:8px">${sField('numCtx', 'Context size (tokens)', 'number', 'min="2048" step="1024"')}${sField('temperature', 'Temperature (0 = strict)', 'number', 'min="0" max="1" step="0.1"')}${sField('timeoutSec', 'Time limit per request (seconds; doubled in Careful mode)', 'number', 'min="30"')}</div></details>
         <details style="margin-top:12px" ${UI.openHelp ? 'open' : ''}><summary><b>First-time Ollama setup</b></summary>${ollamaHelp()}</details>`;
     } else if (p === 'openai') {
       ai += `<div class="grid2">${sField('oaUrl', 'API address (ends before /chat/completions)')}${sField('oaModel', 'Model (for AnythingLLM: the workspace slug)')}</div>${sField('oaKey', 'API key (if needed)', 'password')}
@@ -799,15 +837,20 @@
     const warns = remoteWarning();
     if (warns.length) ai += warns.map((w) => `<div class="banner${/Copy & paste/.test(w) ? ' info' : ' bad'}" style="margin-top:12px">${esc(w)}</div>`).join('');
     ai += '</div>';
+    const mode = s.provider === 'manual' ? '' : `<div class="box"><h2>Fast or Careful</h2>
+      <p class="hint">Choose next to <b>✨ Organize all</b> each time. <b>⚡ Fast</b>: quick answers, no thinking. <b>🧠 Careful</b>: the AI thinks first. Slower (often 2–3 times), but better at understanding what you meant. The thinking is saved and folded away under <b>Show AI’s thinking</b>.</p>
+      <p style="margin:8px 0 4px">In Careful mode, let the AI think in:</p>
+      <div class="row">${sField('thinkSplit', 'Step 1: splitting notes', 'checkbox')}${sField('thinkSurvey', 'Step 2: questions', 'checkbox')}${sField('thinkOrganize', 'Step 3: organizing (typos, category, tasks)', 'checkbox')}</div>
+      <p class="muted small" style="margin-top:6px">Some models cannot think. Careful mode then works like Fast mode.</p></div>`;
     const survey = `<div class="box"><h2>Questions before organizing</h2>${sField('survey', 'Let the AI ask me about words and notes it does not understand', 'checkbox')}<div style="max-width:220px;margin-top:8px">${sField('surveyMax', 'Maximum questions per run', 'number', 'min="1" max="20"')}</div></div>`;
-    return ai + survey + catEditor() + promptEditor() + storageBox() + `<div class="box"><h2>Look</h2><div class="field" style="max-width:220px"><label for="set-theme">Theme</label>
+    return ai + mode + survey + catEditor() + promptEditor() + storageBox() + `<div class="box"><h2>Look</h2><div class="field" style="max-width:220px"><label for="set-theme">Theme</label>
       <select id="set-theme" data-set="theme"><option value="auto"${s.theme === 'auto' ? ' selected' : ''}>Same as Windows</option><option value="light"${s.theme === 'light' ? ' selected' : ''}>Light</option><option value="dark"${s.theme === 'dark' ? ' selected' : ''}>Dark</option></select></div></div>
       <div class="box"><h2>Danger zone</h2><button class="btn danger" data-act="deleteAll">Delete everything in Mind Desk</button><p class="muted small">Mind Desk ${esc(VERSION)}</p></div>`;
   }
   function ollamaHelp() {
     return `<ol class="steps">
       <li>If Ollama is not installed yet: download it from <b>ollama.com/download</b> (Windows), run the installer, and open <b>Ollama</b> from the Start menu.</li>
-      <li>Download a model once. Press the <b>Windows key</b>, type <code>cmd</code>, press <b>Enter</b>, then type <code>ollama pull ${esc(S.settings.model || 'qwen3:8b')}</code> and press <b>Enter</b>. Wait for <b>success</b>.</li>
+      <li>Download a model once. Press the <b>Windows key</b>, type <code>cmd</code>, press <b>Enter</b>, then type <code>ollama pull ${esc(S.settings.model || 'qwen3.5:9b')}</code> and press <b>Enter</b>. Wait for <b>success</b>.</li>
       <li>Allow Mind Desk to talk to Ollama (needed because Mind Desk is a file on your PC):<br>
         Press the <b>Windows key</b>, type <b>environment</b>, open <b>Edit environment variables for your account</b>. Under <b>User variables</b> click <b>New…</b>.<br>
         Variable name: <code>OLLAMA_ORIGINS</code> · Variable value: <code>*</code> · click <b>OK</b>, then <b>OK</b> again.</li>
@@ -942,17 +985,18 @@
     async rerun(el) {
       if (RUN.active) return;
       const it = S.items.find((i) => i.id === el.dataset.id);
-      RUN.active = true; RUN.stop = false; paintTop(); setProgress('Asking AI again', 0, 0);
+      RUN.active = true; RUN.stop = false; RUN.mode = el.dataset.mode === 'careful' ? 'careful' : el.dataset.mode === 'fast' ? 'fast' : S.settings.mode;
+      paintTop(); setProgress(RUN.mode === 'careful' ? 'Asking AI again (careful)' : 'Asking AI again', 0, 0);
       try { await organizeOne(it); toast('Updated.'); } catch (e) { if (e.name !== 'AbortError') showError(e); } finally { RUN.active = false; UI.focus = it.id; save(); render(); }
     },
     async resurvey(el) {
       if (busy()) return;
       const it = S.items.find((i) => i.id === el.dataset.id); if (!it) return;
-      RUN.active = true; RUN.stop = false; paintTop(); setProgress('Reading the note for questions', 0, 0);
+      RUN.active = true; RUN.stop = false; RUN.mode = S.settings.mode; paintTop(); setProgress('Reading the note for questions', 0, 0);
       try {
         const qs = await runSurvey([it]); save();
         if (it.surveyFailed) toast('The questions step failed again. You can still edit the note yourself.');
-        else if (qs.length) { S.survey = { questions: qs, createdAt: Date.now() }; UI.view = 'survey'; toast('Answer the questions, then use “Ask AI again” on the note.', 6000); } else toast('No questions this time.');
+        else if (qs.length) { S.survey = { questions: qs, createdAt: Date.now() }; if (RUN.surveyThinking) S.survey.thinking = RUN.surveyThinking; UI.view = 'survey'; toast('Answer the questions, then use “Ask AI again” on the note.', 6000); } else toast('No questions this time.');
       } catch (e) { if (e.name !== 'AbortError') showError(e); } finally { RUN.active = false; save(); render(); }
     },
     deleteItem(el) { if (busy()) return; if (!window.confirm('Delete this item and its tasks? (Your original note stays in the Inbox.)')) return; removeItems([el.dataset.id]); save(); render(); },
@@ -1003,10 +1047,10 @@
       setConn('<span class="muted">Sending a small test note to the AI… (the first time can take a minute while the model loads)</span>');
       const sample = 'i wnat to bulid a tool tomorow for my notes..also buy milk haha';
       const c = ctx(); const p = C.buildOrganizePrompt(prompt('organize'), sample, c); const t0 = Date.now();
-      RUN.active = true; RUN.stop = false;
+      RUN.active = true; RUN.stop = false; RUN.mode = S.settings.mode;
       try {
-        const chk = C.checkOrganize(await aiJSON('organize', p.system, p.user), sample, c);
-        setConn(`<div class="banner info">✓ The AI answered in ${((Date.now() - t0) / 1000).toFixed(1)} s.<br><b>Before:</b> ${esc(sample)}<br><b>After:</b> ${esc(chk.text)}<br><b>Category:</b> ${esc(C.catPath(cats(), chk.category))}${chk.tasks.length ? '<br><b>Tasks:</b> ' + esc(chk.tasks.map((x) => x.text).join(' · ')) : ''}</div>`);
+        const a = await aiJSON('organize', p.system, p.user); const chk = C.checkOrganize(a.data, sample, c);
+        setConn(`<div class="banner info">✓ The AI answered in ${((Date.now() - t0) / 1000).toFixed(1)} s (${RUN.mode === 'careful' ? 'Careful' : 'Fast'} mode).<br><b>Before:</b> ${esc(sample)}<br><b>After:</b> ${esc(chk.text)}<br><b>Category:</b> ${esc(C.catPath(cats(), chk.category))}${chk.tasks.length ? '<br><b>Tasks:</b> ' + esc(chk.tasks.map((x) => x.text).join(' · ')) : ''}</div>${thinkBox(a.thinking)}`);
       } catch (e) { setConn(`<div class="banner bad">${esc(e.message)}</div>${e.conn ? connHelpHtml() : ''}`); } finally { RUN.active = false; }
     },
     addCat() {
@@ -1133,7 +1177,7 @@
     window.addEventListener('drop', (e) => { e.preventDefault(); depth = 0; drop.classList.remove('on'); if (e.dataTransfer && e.dataTransfer.files.length) addFiles([...e.dataTransfer.files]); });
     window.addEventListener('beforeunload', (e) => { if (RUN.active || saveState === 'saving' || UI.dirty) { e.preventDefault(); e.returnValue = ''; } });
   }
-  const CONNECTION = ['provider', 'ollamaUrl', 'model', 'think', 'numCtx', 'temperature', 'timeoutSec', 'oaUrl', 'oaKey', 'oaModel'];
+  const CONNECTION = ['provider', 'ollamaUrl', 'model', 'numCtx', 'temperature', 'timeoutSec', 'oaUrl', 'oaKey', 'oaModel'];
   async function importFile(f) {
     try {
       let o;

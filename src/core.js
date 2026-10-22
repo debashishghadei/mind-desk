@@ -513,6 +513,10 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
       for (const [k, v] of Object.entries(o.settings)) if (v !== null && !['string', 'number', 'boolean'].includes(typeof v)) return `The setting “${k}” in the backup is damaged.`;
     }
     for (const t of o.tasks) if (t.createdAt !== undefined && typeof t.createdAt !== 'number') return 'A task has a damaged date.';
+    const optStr = (v) => v === undefined || v === null || str(v);
+    if (o.items.some((it) => !optStr(it.thinking) || !(it.mode === undefined || ['fast', 'careful'].includes(it.mode)))) return 'An item has damaged AI thinking.';
+    if (o.notes.some((n) => !optStr(n.splitThinking))) return 'A note has damaged AI thinking.';
+    if (o.survey && !optStr(o.survey.thinking)) return 'The open questions in the backup are damaged.';
     const catIds = new Set(o.categories.map((c) => c.id)); const noteIds = new Set(o.notes.map((n) => n.id)); const itemIds = new Set(o.items.map((i) => i.id));
     for (const c of o.categories) {
       if (c.parent && !catIds.has(c.parent)) return `Category “${c.name}” points to a missing parent.`;

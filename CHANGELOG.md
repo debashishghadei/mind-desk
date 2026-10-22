@@ -2,6 +2,15 @@
 
 All notable changes to Mind Desk. Versions follow semantic versioning.
 
+## 1.0.3 — 2026-10-22
+
+- **⚡ Fast / 🧠 Careful** choice next to ✨ Organize all. Fast: quick answers, no thinking. Careful: the AI thinks first (slower, better at understanding intent). Mind Desk remembers the last choice.
+- The AI's thinking is saved and folded away: "Show AI's thinking" on each item, "Show how the AI decided to split this note" in the Inbox, and on the Questions page.
+- "Ask AI again" offers ⚡ Fast or 🧠 Careful for one item.
+- Settings → Fast or Careful: choose which steps think in Careful mode (split, questions, organize).
+- Careful mode gives the AI more room (context) and double the time limit; a model that cannot think falls back to normal answers automatically; thinking inside `<think>` tags is moved out of the answer.
+- Default model is now `qwen3.5:9b`. The old on/off "think" switch from 1.0.2 becomes Careful mode when it was on.
+
 ## 1.0.2 — 2026-10-21
 
 Fixes from ChatGPT's review of 1.0.1 (points S1–S17, each confirmed by a test that fails on 1.0.1).

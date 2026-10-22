@@ -23,7 +23,7 @@ Always open it the same way in the same browser. Your notes are stored in that b
 ## Connect Ollama (one time, about 10 minutes)
 
 0. If Ollama is not installed: download it from ollama.com/download, install it and open **Ollama** from the Start menu.
-1. **Get a model.** Press the Windows key, type `cmd`, press Enter. Type `ollama pull qwen3:8b` and press Enter. Wait for `success`.
+1. **Get a model.** Press the Windows key, type `cmd`, press Enter. Type `ollama pull qwen3.5:9b` and press Enter. Wait for `success`. (Browse other models at ollama.com/library; `ollama list` shows what you have.)
 2. **Allow Mind Desk to talk to Ollama.** Mind Desk is a file on your PC, and Ollama blocks files by default.
    Windows key → type `environment` → open **Edit environment variables for your account** → under *User variables* click **New…** →
    name `OLLAMA_ORIGINS`, value `*` → **OK**, **OK**.
@@ -35,7 +35,7 @@ With `OLLAMA_ORIGINS=*`, websites you visit could also use your local AI (send i
 ## Daily use
 
 1. **Inbox → Add files** (or drag `.txt` files into the window, or **Paste a note**). The date is added automatically.
-2. **✨ Organize all.** The AI splits each note into items.
+2. Choose **⚡ Fast** (quick) or **🧠 Careful** (the AI thinks first: slower, better at understanding what you meant), then **✨ Organize all**. The AI splits each note into items. In Careful mode, **Show AI's thinking** reveals how it decided.
 3. **Questions for you.** The AI asks about words and notes it does not understand. Your answers go into **My words & rules** and are used every time from then on.
 4. **Review.** Red = removed, green = added by the AI. Approve, edit, change the category, join with the previous item, or keep your original text. Put `---` on its own line while editing to split an item in two.
 5. **To-do** and the **categories** show only approved items. Tick tasks when done.
@@ -59,5 +59,5 @@ Replace `mind-desk.html` (and the `.bat`) with the new files. Your data stays.
 ## For developers
 
 - Source: `src/` (`core.js` logic, `app.js` interface, `style.css`, `index.html`). Build the single file with `node bin/build.js` (`--zip` also makes `dist/mind-desk-<version>.zip`).
-- Tests: `tests/run-tests.js` runs Chromium (Playwright) against `mind-desk.html` opened from a `file://` URL, with a stand-in Ollama (`tests/fake-ollama.js`). `REAL_OLLAMA=http://127.0.0.1:11434` adds a check against a real Ollama. `tests/review-tests.js` and `tests/review2-tests.js` cover the two review rounds.
+- Tests: `tests/run-tests.js` runs Chromium (Playwright) against `mind-desk.html` opened from a `file://` URL, with a stand-in Ollama (`tests/fake-ollama.js`). `REAL_OLLAMA=http://127.0.0.1:11434` adds a check against a real Ollama. `tests/review-tests.js` and `tests/review2-tests.js` cover the two review rounds; `tests/v103-tests.js` covers Fast/Careful.
 - Shared notes for the AIs working on this repo: `HANDOFF.md`, `DECISIONS.md`.
