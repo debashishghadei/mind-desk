@@ -69,6 +69,7 @@
       mode: 'fast', thinkSplit: true, thinkSurvey: true, thinkOrganize: true, // Careful mode: which steps let the AI think first
       thinkLimitSec: 120, editStyle: 'typos', sidebar: 'show',
       oaUrl: 'http://localhost:3001/api/v1/openai', oaKey: '', oaModel: '', manualBatch: 20, survey: true, surveyMax: 8, theme: 'auto',
+      claudeFast: 'auto', claudeCareful: 'auto', claudeEffort: 'auto', // artifact: which Claude answers in Fast / Careful
       ...(ART ? { provider: 'claude' } : {}),
     };
   }
@@ -85,6 +86,8 @@
     out.settings = Object.assign(defaultSettings(), (s && s.settings) || {});
     if ('think' in out.settings) { if (out.settings.think === true && !(s.settings && s.settings.mode)) out.settings.mode = 'careful'; delete out.settings.think; } // 1.0.2 had one on/off switch
     if (!['fast', 'careful'].includes(out.settings.mode)) out.settings.mode = 'fast';
+    for (const k of ['claudeFast', 'claudeCareful']) if (out.settings[k] !== 'auto' && !CLAUDE_MODELS.some((m) => m.id === out.settings[k])) out.settings[k] = 'auto';
+    if (!['auto', 'low', 'medium', 'high'].includes(out.settings.claudeEffort)) out.settings.claudeEffort = 'auto';
     if (ART) { out.settings.provider = 'claude'; out.settings.theme = 'auto'; } // the artifact always uses Claude and the viewer's theme
     else if (out.settings.provider === 'claude') out.settings.provider = 'ollama'; // a backup from the artifact, restored on the PC
     out.prompts = Object.assign({ split: null, survey: null, organize: null, fix: null, chat: null }, (s && s.prompts) || {});
@@ -395,6 +398,18 @@
     invalid_request: 'Mind Desk sent a request Claude could not read (a bug: please send a Report for Claude).',
     transform_error: 'Mind Desk sent a request Claude could not read (a bug: please send a Report for Claude).',
   };
+  /** models the person can choose in the artifact (Settings). Ids are Claude API model ids. */
+  const CLAUDE_MODELS = [
+    { id: 'claude-haiku-5-5', name: 'Haiku 5.5', short: 'Haiku', note: 'fastest, uses least' },
+    { id: 'claude-sonnet-5-5', name: 'Sonnet 5.5', short: 'Sonnet', note: 'balanced' },
+    { id: 'claude-opus-5-5', name: 'Opus 5.5', short: 'Opus', note: 'deepest understanding, slower, uses more' },
+    { id: 'claude-fable-5-1', name: 'Fable 5.1', short: 'Fable', note: 'most capable, if your plan has it' },
+  ];
+  const TIER_NAME = { quick: 'quick', default: 'main', complex: 'most capable' };
+  const modelName = (id) => (CLAUDE_MODELS.find((m) => m.id === id) || { name: id }).name;
+  /** "claude-opus-5-5" → "Opus 5.5"; "tier:quick" → "Claude (quick model)" */
+  const modelLabel = (v) => (String(v).startsWith('tier:') ? `Claude (${TIER_NAME[String(v).slice(5)] || String(v).slice(5)} model)` : modelName(v));
+  const choiceShort = (mode) => { const v = S.settings[mode === 'careful' ? 'claudeCareful' : 'claudeFast']; return v === 'auto' ? (mode === 'careful' ? 'Sonnet' : 'Haiku') : (CLAUDE_MODELS.find((m) => m.id === v) || { short: v }).short; };
   function claudeErr(e) {
     const code = (e && e.code) || 'upstream_error';
     if (code === 'cancelled') return abortErr();
@@ -406,11 +421,23 @@
     const sample = PLAT && PLAT.sample;
     if (!sample) throw claudeErr({ code: 'unavailable' });
     const ctrl = new AbortController(); RUN.ctrl = ctrl;
+    const opts = {
+      modelTier: careful ? 'default' : 'quick', cache: false, signal: ctrl.signal,
+      onText: ({ text }) => { liveUpdate('', text); if (RUN.onText) { try { RUN.onText(text); } catch (e) { /* ignore */ } } },
+    };
+    // the person may choose a named model for Fast and for Careful (Settings); claude.ai falls back to the tier if it cannot run it
+    const want = careful ? S.settings.claudeCareful : S.settings.claudeFast;
+    if (want && want !== 'auto') {
+      opts.model = want;
+      if (careful) { if (S.settings.claudeEffort !== 'auto') opts.effort = S.settings.claudeEffort; } else opts.effort = 'low';
+    }
     try {
-      const r = await sample(user ? system + '\n\n' + user : system, {
-        modelTier: careful ? 'default' : 'quick', cache: false, signal: ctrl.signal,
-        onText: ({ text }) => { liveUpdate('', text); if (RUN.onText) { try { RUN.onText(text); } catch (e) { /* ignore */ } } },
-      });
+      const r = await sample(user ? system + '\n\n' + user : system, opts);
+      RUN.lastModel = r.modelApplied || ('tier:' + (r.modelTierApplied || opts.modelTier));
+      if (opts.model && r.modelApplied !== opts.model && !UI.modelWarned) {
+        UI.modelWarned = true;
+        toast(`${modelName(opts.model)} did not answer (not on your plan here, or busy), so Claude’s ${TIER_NAME[r.modelTierApplied] || 'standard'} model answered instead.`, 8000);
+      }
       if (r.truncated) { const e = new Error('Claude’s answer was cut off because it was too long. Fewer or shorter notes at a time will work.'); e.truncated = true; e.claude = true; throw e; }
       return { content: r.text, thinking: '', tier: r.modelTierApplied };
     } catch (e) {
@@ -426,7 +453,7 @@
     let last; let thinking = ''; let cut = false; const t0 = Date.now();
     let think = S.settings.provider === 'claude' ? RUN.mode === 'careful' : thinks(step);
     const log = (ok, err) => {
-      S.runLog.push({ at: Date.now(), step, note: noteName || '', mode: think || cut ? 'careful' : 'fast', ms: Date.now() - t0, ok, err: err || '', cut, thinkChars: thinking.length });
+      S.runLog.push({ at: Date.now(), step, note: noteName || '', mode: think || cut ? 'careful' : 'fast', ms: Date.now() - t0, ok, err: err || '', cut, thinkChars: thinking.length, ...(S.settings.provider === 'claude' && RUN.lastModel ? { model: modelLabel(RUN.lastModel) } : {}) });
       if (S.runLog.length > 300) S.runLog.splice(0, S.runLog.length - 300);
     };
     liveStart(step);
@@ -600,7 +627,7 @@
 
   function applyResult(it, chk, thinking, ms, cut) {
     if (!alive(it)) return; // deleted or replaced meanwhile: drop the answer
-    it.thinking = thinking ? String(thinking).slice(0, 20000) : undefined; it.mode = RUN.mode || 'fast'; it.ms = ms || undefined;
+    it.thinking = thinking ? String(thinking).slice(0, 20000) : undefined; it.mode = RUN.mode || 'fast'; it.ms = ms || undefined; it.model = S.settings.provider === 'claude' && RUN.lastModel ? RUN.lastModel : undefined;
     if (cut) chk.flags.push('thinkcut');
     it.tags = Array.isArray(it.tags) ? it.tags : []; // one place rule: the AI no longer adds "also show in"; your own choices stay
     it.title = chk.title; it.cat = chk.category; it.text = chk.text; it.flags = chk.flags; it.lost = chk.lost; it.error = '';
@@ -872,7 +899,7 @@
       ${searchable ? `<input type="search" id="search" placeholder="Search…" value="${esc(UI.search)}" aria-label="Search">` : ''}
       <div class="grow"></div><div class="progress" id="progress"></div>
       ${S.settings.provider === 'manual' ? '' : `<select id="modeSel" data-set="mode" aria-label="Fast or careful" ${RUN.active ? 'disabled' : ''} title="Fast: quick answers. Careful: the AI thinks first (slower, better at understanding what you meant).">
-        <option value="fast"${S.settings.mode === 'fast' ? ' selected' : ''}>⚡ Fast</option><option value="careful"${S.settings.mode === 'careful' ? ' selected' : ''}>🧠 Careful</option></select>`}
+        <option value="fast"${S.settings.mode === 'fast' ? ' selected' : ''}>⚡ Fast${ART ? ' · ' + esc(choiceShort('fast')) : ''}</option><option value="careful"${S.settings.mode === 'careful' ? ' selected' : ''}>🧠 Careful${ART ? ' · ' + esc(choiceShort('careful')) : ''}</option></select>`}
       <button class="btn primary" data-act="organizeAll" ${RUN.active ? 'disabled' : ''} title="Split, ask questions and organize all new notes">✨ Organize all${pendingWork ? ` (${pendingWork})` : ''}</button>`;
     if (RUN.active) setProgress(RUN.label, RUN.done, RUN.total);
   }
@@ -973,7 +1000,7 @@
       if (UI.editing === it.id) { h += editorHtml(it); continue; }
       const d = diffHtml(it.original, it.text); const n = noteOf(it); const prev = prevInNote(it);
       h += `<div class="card" data-item="${esc(it.id)}">
-        <div class="itemhead"><div class="grow"><h3>${esc(it.title)}</h3><div class="meta">${esc(n ? n.name : '')} · ${esc(C.fmtDate(it.createdAt))}${it.mode === 'careful' ? ' · 🧠 careful' : ''}</div></div>
+        <div class="itemhead"><div class="grow"><h3>${esc(it.title)}</h3><div class="meta">${esc(n ? n.name : '')} · ${esc(C.fmtDate(it.createdAt))}${it.mode === 'careful' ? ' · 🧠 careful' : ''}${it.model ? ' · ' + esc(modelLabel(it.model)) : ''}</div></div>
           <select data-change="setCat" data-id="${esc(it.id)}" aria-label="Category">${catOptions(it.cat)}</select></div>
         <div class="row" style="margin-top:6px">${it.tags.map((t) => `<span class="chip acc">also: ${esc(C.catPath(cats(), t))}</span>`).join(' ')} ${flagChips(it)}</div>
         ${UI.teach && UI.teach.itemId === it.id ? `<div class="acard mem" style="margin-top:8px"><div class="small muted">You moved this item. Teach Mind Desk so it does this itself next time? (edit the sentence if you like)</div><div class="row" style="margin-top:4px"><input type="text" id="teachText" value="${esc(UI.teach.text)}" style="flex:1"><button class="btn small primary" data-act="saveTeach">Remember</button><button class="btn small" data-act="skipTeach">No thanks</button></div></div>` : ''}
@@ -1106,7 +1133,7 @@
     const rem = (m.remember || []).map((r) => r.status === 'pending'
       ? `<div class="acard mem"><div class="small muted">Remember this from now on?</div><div class="row" style="margin-top:4px"><input type="text" data-remtext="${esc(r.id)}" value="${esc(r.text)}" style="flex:1"><button class="btn small primary" data-act="saveRemember" data-c="${esc(c.id)}" data-m="${esc(m.id)}" data-r="${esc(r.id)}">Remember</button><button class="btn small" data-act="skipRemember" data-c="${esc(c.id)}" data-m="${esc(m.id)}" data-r="${esc(r.id)}">No</button></div></div>`
       : `<div class="acard mem"><span class="chip ${r.status === 'saved' ? 'good' : ''}">${r.status === 'saved' ? '🧠 Remembered' : 'Not remembered'}</span> <span class="small">${esc(r.text)}</span></div>`).join('');
-    return `<div class="msg ai"><div class="bubble${m.error ? ' err' : ''}"><div class="pre">${chatRichText(m.text)}</div>${acts}${rem}${m.dropped ? `<div class="muted small" style="margin-top:6px">${m.dropped} suggestion(s) were left out because they pointed to notes that do not exist.</div>` : ''}${thinkBox(m.thinking)}</div></div>`;
+    return `<div class="msg ai"><div class="bubble${m.error ? ' err' : ''}"><div class="pre">${chatRichText(m.text)}</div>${acts}${rem}${m.dropped ? `<div class="muted small" style="margin-top:6px">${m.dropped} suggestion(s) were left out because they pointed to notes that do not exist.</div>` : ''}${thinkBox(m.thinking)}${m.model ? `<div class="muted small" style="margin-top:6px">${esc(modelLabel(m.model))}</div>` : ''}</div></div>`;
   }
   function viewChat() {
     if (!curChat() && S.chats.length && UI.chatId !== 'new') UI.chatId = S.chats[S.chats.length - 1].id;
@@ -1154,8 +1181,14 @@
     const warns = ART ? [] : remoteWarning();
     if (warns.length) ai += warns.map((w) => `<div class="banner${/Copy & paste/.test(w) ? ' info' : ' bad'}" style="margin-top:12px">${esc(w)}</div>`).join('');
     if (!ART) ai += '</div>';
-    const mode = s.provider === 'claude' ? `<div class="box"><h2>Fast or Careful</h2>
-      <p class="hint">Choose next to <b>✨ Organize all</b> each time. <b>⚡ Fast</b>: Claude’s quick model answers in seconds and uses little of your plan. <b>🧠 Careful</b>: Claude’s main model thinks before it answers. Slower and uses more of your plan, but better at understanding what you meant. (Claude’s thinking is not shown here.)</p></div>`
+    const mOpt = (key) => `<option value="auto"${s[key] === 'auto' ? ' selected' : ''}>Automatic (${key === 'claudeFast' ? 'quick model, usually Haiku' : 'main model, usually Sonnet'})</option>` + CLAUDE_MODELS.map((m) => `<option value="${m.id}"${s[key] === m.id ? ' selected' : ''}>${esc(m.name)} — ${esc(m.note)}</option>`).join('');
+    const mode = s.provider === 'claude' ? `<div class="box"><h2>Fast or Careful: which Claude answers</h2>
+      <p class="hint">Choose <b>⚡ Fast</b> or <b>🧠 Careful</b> next to <b>✨ Organize all</b> each time. Here you choose which Claude model each one uses. Bigger models understand messy notes better but are slower and use more of your plan’s limit. If your plan cannot use a model, Claude picks one it can and Mind Desk tells you. Each item shows which model made it.</p>
+      <div class="grid2"><div class="field"><label for="set-claudeFast">⚡ Fast uses</label><select id="set-claudeFast" data-set="claudeFast">${mOpt('claudeFast')}</select></div>
+      <div class="field"><label for="set-claudeCareful">🧠 Careful uses</label><select id="set-claudeCareful" data-set="claudeCareful">${mOpt('claudeCareful')}</select></div></div>
+      <div class="field" style="max-width:420px"><label for="set-claudeEffort">How hard Careful thinks (with a chosen model)</label><select id="set-claudeEffort" data-set="claudeEffort">
+        ${[['auto', 'Normal'], ['low', 'Low (faster)'], ['medium', 'Medium'], ['high', 'High (slowest, most thorough)']].map(([v, l]) => `<option value="${v}"${s.claudeEffort === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div>
+      <p class="muted small">A chosen model in ⚡ Fast thinks only a little, to stay quick. Claude’s thinking is not shown here.</p></div>`
       : s.provider === 'manual' ? '' : `<div class="box"><h2>Fast or Careful</h2>
       <p class="hint">Choose next to <b>✨ Organize all</b> each time. <b>⚡ Fast</b>: quick answers, no thinking. <b>🧠 Careful</b>: the AI thinks first. Slower (often 2–3 times), but better at understanding what you meant. The thinking is saved and folded away under <b>Show AI’s thinking</b>.</p>
       <p style="margin:8px 0 4px">In Careful mode, let the AI think in:</p>
@@ -1259,13 +1292,15 @@
       if (busy()) return;
       const n = S.notes.find((x) => x.id === el.dataset.id); const its = S.items.filter((i) => i.noteId === n.id);
       if (!(await ask(`Delete “${n.name}”${its.length ? ` and the ${its.length} item(s) made from it` : ''}? This cannot be undone.`, { okText: 'Delete', danger: true }))) return;
-      removeItems(its.map((i) => i.id)); S.notes = S.notes.filter((x) => x.id !== n.id); save(); render();
+      if (busy() || !S.notes.includes(n)) return; // a run started or the note went away while the question was open
+      removeItems(S.items.filter((i) => i.noteId === n.id).map((i) => i.id)); S.notes = S.notes.filter((x) => x.id !== n.id); save(); render();
     },
     async reorganizeNote(el) {
       if (busy()) return;
       const n = S.notes.find((x) => x.id === el.dataset.id); const its = S.items.filter((i) => i.noteId === n.id);
       if (its.length && !(await ask(`This removes the ${its.length} item(s) made from this note (also approved ones and their tasks) and organizes the note again. Continue?`, { okText: 'Organize again', danger: true }))) return;
-      removeItems(its.map((i) => i.id)); n.status = 'new'; save(); render(); organizeAll([n.id]);
+      if (busy() || !S.notes.includes(n)) return;
+      removeItems(S.items.filter((i) => i.noteId === n.id).map((i) => i.id)); n.status = 'new'; save(); render(); organizeAll([n.id]);
     },
     organizeAll() { organizeAll(); },
     organizeNote(el) { organizeAll([el.dataset.id]); },
@@ -1429,7 +1464,7 @@
         let data; let thinking = '';
         if (S.settings.provider === 'manual') data = await askManual('Chat: your message for ChatGPT or Claude', p.system + '\n\n' + p.user);
         else {
-          UI.liveReply = '';
+          UI.liveReply = ''; RUN.lastModel = null;
           // Claude streams: show the "reply" part of its JSON answer while it is written
           RUN.onText = (t) => { const r = C.partialReply(t); if (r) { UI.liveReply = r; const el = $('#liveReply'); if (el) { el.textContent = r; scrollChat(); } } };
           const a = await aiJSON('chat', p.system, p.user, 'chat'); data = a.data; thinking = a.thinking;
@@ -1437,6 +1472,7 @@
         const acts = C.checkChatActions(data.actions, S, p.ids);
         out.text = String(data.reply || '').trim() || (acts.actions.length ? 'Here is what I suggest:' : '(no answer)');
         if (thinking) out.thinking = thinking.slice(0, 20000);
+        if (S.settings.provider === 'claude' && RUN.lastModel) out.model = RUN.lastModel;
         out.actions = acts.actions.map((a) => Object.assign({ id: C.uid('x'), status: a.type === 'show_note' ? 'shown' : 'pending' }, a));
         out.remember = C.checkRemember(data.remember, S.memory).map((t) => ({ id: C.uid('r'), text: t, status: 'pending' }));
         if (acts.dropped) out.dropped = acts.dropped;
@@ -1527,7 +1563,7 @@
       RUN.active = true; RUN.stop = false; RUN.mode = S.settings.mode;
       try {
         const a = await aiJSON('organize', p.system, p.user, 'test note'); const chk = C.checkOrganize(a.data, sample, c);
-        setConn(`<div class="banner info">✓ The AI answered in ${((Date.now() - t0) / 1000).toFixed(1)} s (${RUN.mode === 'careful' ? 'Careful' : 'Fast'} mode).<br><b>Before:</b> ${esc(sample)}<br><b>After:</b> ${esc(chk.text)}<br><b>Category:</b> ${esc(C.catPath(cats(), chk.category))}${chk.tasks.length ? '<br><b>Tasks:</b> ' + esc(chk.tasks.map((x) => x.text).join(' · ')) : ''}</div>${thinkBox(a.thinking)}`);
+        setConn(`<div class="banner info">✓ The AI answered in ${((Date.now() - t0) / 1000).toFixed(1)} s (${RUN.mode === 'careful' ? 'Careful' : 'Fast'} mode${S.settings.provider === 'claude' && RUN.lastModel ? ', ' + esc(modelLabel(RUN.lastModel)) : ''}).<br><b>Before:</b> ${esc(sample)}<br><b>After:</b> ${esc(chk.text)}<br><b>Category:</b> ${esc(C.catPath(cats(), chk.category))}${chk.tasks.length ? '<br><b>Tasks:</b> ' + esc(chk.tasks.map((x) => x.text).join(' · ')) : ''}</div>${thinkBox(a.thinking)}`);
       } catch (e) { setConn(`<div class="banner bad">${esc(e.message)}</div>${e.conn ? connHelpHtml() : ''}`); } finally { RUN.active = false; }
     },
     addCat() {
@@ -1631,6 +1667,7 @@
         S.settings[k] = v; save();
         if (k === 'provider') { UI.connResult = ''; renderContent(); }
         if (k === 'theme') applyTheme();
+        if (k === 'claudeFast' || k === 'claudeCareful') { UI.modelWarned = false; paintTop(); }
         if (k === 'model' || k === 'ollamaUrl' || k === 'oaUrl') { UI.connResult = ''; renderContent(); }
         return;
       }
@@ -1670,7 +1707,7 @@
     window.addEventListener('drop', (e) => { e.preventDefault(); depth = 0; drop.classList.remove('on'); if (e.dataTransfer && e.dataTransfer.files.length) addFiles([...e.dataTransfer.files]); });
     window.addEventListener('beforeunload', (e) => { if (RUN.active || saveState === 'saving' || UI.dirty) { e.preventDefault(); e.returnValue = ''; } });
   }
-  const CONNECTION = ['provider', 'ollamaUrl', 'model', 'numCtx', 'temperature', 'timeoutSec', 'oaUrl', 'oaKey', 'oaModel'];
+  const CONNECTION = ['provider', 'ollamaUrl', 'model', 'numCtx', 'temperature', 'timeoutSec', 'oaUrl', 'oaKey', 'oaModel', 'claudeFast', 'claudeCareful', 'claudeEffort'];
   async function importFile(f) {
     try {
       let o;

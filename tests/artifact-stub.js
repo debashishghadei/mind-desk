@@ -93,7 +93,10 @@
     return 'I am not sure what you want.';
   }
   function sample(input, opts = {}) {
-    const call = { input: typeof input === 'string' ? input : JSON.stringify(input), tier: opts.modelTier || 'default', cache: opts.cache, t: Date.now() };
+    const call = { input: typeof input === 'string' ? input : JSON.stringify(input), tier: opts.modelTier || 'default', model: opts.model, effort: opts.effort, cache: opts.cache, t: Date.now() };
+    // a named model answers only if this viewer's plan has it (cfg.models); otherwise the tier answers and modelApplied is absent
+    const models = (window.__cfg && window.__cfg.models) || ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5'];
+    const applied = opts.model && models.includes(opts.model) ? opts.model : undefined;
     window.__calls.push(call);
     return new Promise((resolve, reject) => {
       const sig = opts.signal;
@@ -108,7 +111,7 @@
       call.answer = text;
       const n = 3; const step = Math.ceil(text.length / n); const d = (window.__cfg && window.__cfg.delay) || 20;
       for (let k = 1; k <= n; k++) timers.push(setTimeout(() => { if (!done && opts.onText) opts.onText({ text: text.slice(0, k * step), delta: text.slice((k - 1) * step, k * step) }); }, d * k));
-      timers.push(setTimeout(() => finish(() => resolve({ text, truncated: !!(ov && ov.truncated), modelTierApplied: opts.modelTier || 'default' })), d * (n + 1)));
+      timers.push(setTimeout(() => finish(() => resolve(Object.assign({ text, truncated: !!(ov && ov.truncated), modelTierApplied: opts.modelTier || 'default' }, applied ? { modelApplied: applied } : {}))), d * (n + 1)));
     });
   }
   sample.json = async (input, opts) => JSON.parse((await sample(input, opts)).text);

@@ -2,6 +2,15 @@
 
 All notable changes to Mind Desk. Versions follow semantic versioning.
 
+## 1.2.1 — 2026-10-22
+
+**Choose which Claude answers** (artifact).
+
+- Settings → **Fast or Careful: which Claude answers**: pick the model for ⚡ Fast and for 🧠 Careful: Automatic (quick model / main model, as in 1.2.0), Haiku 5.5, Sonnet 5.5, Opus 5.5 or Fable 5.1. For Careful you can also choose how hard it thinks (Normal, Low, Medium, High). A chosen model in Fast thinks only a little, to stay quick.
+- The top bar shows the choice, e.g. “⚡ Fast · Haiku”, “🧠 Careful · Opus”.
+- Each item, chat answer and the test note show which model answered. If the chosen model cannot answer (not on your plan, or busy), claude.ai uses its own model for that level and Mind Desk says so once.
+- Model choices stay when you restore a backup. Reports list the model per request.
+
 ## 1.2.0 — 2026-10-22
 
 **Mind Desk as a Claude artifact** (second build from the same source; the PC version works as before).

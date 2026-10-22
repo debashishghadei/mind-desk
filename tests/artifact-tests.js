@@ -369,6 +369,51 @@ async function test(name, fn) {
     assert.deepStrictEqual(p.errors, []);
   });
 
+  await test('A19 model choice: Careful = Opus 5.5 with high effort, Fast = Sonnet with low effort; items and chat show the model', async () => {
+    const p = await page();
+    await p.click('[data-act=nav][data-v=settings]');
+    await p.selectOption('#set-claudeCareful', 'claude-opus-5-5'); await p.selectOption('#set-claudeEffort', 'high');
+    await p.selectOption('#set-claudeFast', 'claude-sonnet-5-5');
+    assert.ok(/Careful · Opus/.test(await p.textContent('#modeSel')) && /Fast · Sonnet/.test(await p.textContent('#modeSel')), await p.textContent('#modeSel'));
+    await p.selectOption('#modeSel', 'careful');
+    await paste(p, 'n', 'buy milk\n\ncall Ravi about PowerPoint');
+    await p.click('[data-act=organizeAll]'); await waitRunEnd(p);
+    let c = await p.evaluate(() => window.__calls.map((x) => [x.model, x.effort, x.tier]));
+    assert.ok(c.length && c.every((x) => x[0] === 'claude-opus-5-5' && x[1] === 'high' && x[2] === 'default'), JSON.stringify(c));
+    assert.ok(/Opus 5\.5/.test(await p.textContent('#content')), 'review shows the model');
+    assert.ok(await p.evaluate(() => MD.state.items.every((i) => i.model === 'claude-opus-5-5')));
+    await p.evaluate(() => { window.__calls.length = 0; });
+    await p.click('[data-act=rerun][data-mode=fast] >> nth=0'); await waitRunEnd(p);
+    c = await p.evaluate(() => window.__calls.map((x) => [x.model, x.effort, x.tier]));
+    assert.deepStrictEqual(c, [['claude-sonnet-5-5', 'low', 'quick']]);
+    // automatic again: no model name is sent
+    await p.click('[data-act=nav][data-v=settings]'); await p.selectOption('#set-claudeCareful', 'auto');
+    await p.click('[data-act=nav][data-v=chat]'); await p.fill('#chatIn', 'hello'); await p.click('[data-act=sendChat]'); await waitRunEnd(p);
+    c = await p.evaluate(() => window.__calls.slice(-1).map((x) => [x.model, x.effort, x.tier]));
+    assert.deepStrictEqual(c, [[undefined, undefined, 'default']]);
+    assert.ok(/Claude \(main model\)/.test(await p.textContent('#msgs')), 'chat shows which model answered');
+    assert.ok(!(await p.isVisible('.toast >> text=did not answer')), 'no fallback warning when the model answered');
+    assert.deepStrictEqual(p.errors, []);
+  });
+
+  await test('A20 a chosen model the plan does not have: Claude’s tier answers, Mind Desk says so once, and the item shows who answered', async () => {
+    const p = await page({ models: ['claude-haiku-5-5'] });
+    await p.evaluate(() => { MD.state.settings.claudeFast = 'claude-fable-5-1'; MD.save(); MD.render(); });
+    await paste(p, 'n', 'buy milk\n\ncall Ravi'); await p.click('[data-act=organizeAll]'); await waitRunEnd(p);
+    assert.ok(/Fable 5\.1 did not answer/.test(await p.evaluate(() => [...document.querySelectorAll('.toast')].map((t) => t.textContent).join(' | '))));
+    assert.ok(await p.evaluate(() => MD.state.items.every((i) => i.model === 'tier:quick')));
+    assert.ok(/Claude \(quick model\)/.test(await p.evaluate(() => { MD.UI.view = 'review'; MD.render(); return document.querySelector('#content').textContent; })));
+    assert.strictEqual(await p.evaluate(() => [...document.querySelectorAll('.toast')].filter((t) => /did not answer/.test(t.textContent)).length), 1, 'warned once, not per request');
+    // an unknown saved model id falls back to automatic
+    await p.evaluate(() => { MD.state.settings.claudeCareful = 'claude-old-1'; });
+    await p.evaluate(() => MD.ACT.nav({ dataset: { v: 'settings' } }));
+    assert.strictEqual(await p.evaluate(() => MD.state.settings.claudeCareful), 'claude-old-1', 'kept until next load');
+    await saved(p); const d = await dump(p); await p.context().close();
+    const p2 = await page({ dbData: d }, { raw: true });
+    assert.strictEqual(await p2.evaluate(() => MD.state.settings.claudeCareful), 'auto');
+    assert.deepStrictEqual(p.errors, []); assert.deepStrictEqual(p2.errors, []);
+  });
+
   await browser.close();
   const ok = results.filter((r) => r.ok).length;
   console.log(`\n${ok}/${results.length} passed`);
