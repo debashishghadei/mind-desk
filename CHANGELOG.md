@@ -2,6 +2,19 @@
 
 All notable changes to Mind Desk. Versions follow semantic versioning.
 
+## 1.1.0 — 2026-10-22
+
+**Chat + Memory.**
+
+- **💬 Chat** page with saved chats (new chat, open, delete). Enter sends, Shift+Enter makes a new line. Example questions on an empty chat.
+- Mind Desk finds what fits each message itself and gives only that to the AI: a short overview of notes and categories, notes you name ("note 4", "Notepad tab 3"), the best matching items, and tasks when you ask about to-dos. Unrelated notes are not sent. The last 10 messages are sent as history.
+- The AI can **suggest** changes, shown as cards with **Apply / Cancel**: move an item, rename it, mark a task done or not done, add a task, organize a note again with your instruction (e.g. "keep Hinglish words"). Nothing changes before you click Apply; suggestions that point to things that do not exist are left out.
+- "Show me note 4" shows that note's items right in the chat; links in answers open the item or note.
+- **🧠 Memory**: when you tell the chat something lasting ("remember: BR is my client"), it offers a Memory card you can edit and save. Changing a category in Review offers "Teach Mind Desk" with a ready sentence. The Memory page (was "My words & rules") lists everything; you can add, edit and delete. Your old "My rules" moved into Memory. Memory is sent with every AI request: organizing, questions, Fix my typing and chat, with any model or provider. A warning appears when Memory gets long.
+- Answers to "what does this note mean?" questions now go into Memory.
+- Chat works in Fast and Careful (thinking folded under the answer), with the live panel and Stop, and in copy & paste mode.
+- Chats and Memory are in backups and fully checked on restore. A note's instruction from the chat is shown in the Inbox and can be removed.
+
 ## 1.0.4 — 2026-10-22
 
 Changes from the owner's first real run.

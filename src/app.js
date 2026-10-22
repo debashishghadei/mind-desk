@@ -68,7 +68,7 @@
     return {
       app: 'mind-desk', schema: 1, notes: [], items: [], tasks: [], categories: C.defaultCategories(),
       words: [{ id: C.uid('w'), term: 'Madhutech', meaning: 'Madhu Infotech, my job (not my own website)' }],
-      rules: [], prompts: { split: null, survey: null, organize: null, fix: null }, settings: defaultSettings(), survey: null, folderFiles: [], folderOriginals: [], runLog: [],
+      rules: [], memory: [], chats: [], prompts: { split: null, survey: null, organize: null, fix: null, chat: null }, settings: defaultSettings(), survey: null, folderFiles: [], folderOriginals: [], runLog: [],
     };
   }
   function migrate(s) {
@@ -77,14 +77,16 @@
     out.settings = Object.assign(defaultSettings(), (s && s.settings) || {});
     if ('think' in out.settings) { if (out.settings.think === true && !(s.settings && s.settings.mode)) out.settings.mode = 'careful'; delete out.settings.think; } // 1.0.2 had one on/off switch
     if (!['fast', 'careful'].includes(out.settings.mode)) out.settings.mode = 'fast';
-    out.prompts = Object.assign({ split: null, survey: null, organize: null, fix: null }, (s && s.prompts) || {});
-    for (const k of ['notes', 'items', 'tasks', 'words', 'rules', 'folderFiles', 'folderOriginals', 'runLog']) if (!Array.isArray(out[k])) out[k] = [];
+    out.prompts = Object.assign({ split: null, survey: null, organize: null, fix: null, chat: null }, (s && s.prompts) || {});
+    for (const k of ['notes', 'items', 'tasks', 'words', 'rules', 'memory', 'chats', 'folderFiles', 'folderOriginals', 'runLog']) if (!Array.isArray(out[k])) out[k] = [];
+    // 1.1.0: "My rules" become Memory (one list the AI uses everywhere)
+    if (((s && s.schema) || 1) < 3 && out.rules.length) { out.rules.filter((r) => r && r.trim()).forEach((r) => out.memory.push({ id: C.uid('m'), text: r.trim(), at: Date.now(), source: 'rule' })); out.rules = []; }
     if (!['typos', 'clean'].includes(out.settings.editStyle)) out.settings.editStyle = 'typos';
     // 1.0.4 one place rule: "also show in" tags made by the AI before 1.0.4 are removed once
     if (((s && s.schema) || 1) < 2) out.items.forEach((it) => { if (Array.isArray(it.tags)) it.tags = []; });
     if (!Array.isArray(out.categories) || !out.categories.length) out.categories = C.defaultCategories();
     for (const sys of ['todo', 'unsorted']) if (!out.categories.some((c) => c.id === sys)) out.categories.push(C.defaultCategories().find((c) => c.id === sys));
-    out.app = 'mind-desk'; out.schema = 2;
+    out.app = 'mind-desk'; out.schema = 3;
     return out;
   }
 
@@ -124,7 +126,8 @@
   const cat = (id) => S.categories.find((c) => c.id === id);
   const noteOf = (it) => S.notes.find((n) => n.id === it.noteId);
   const itemTasks = (id) => S.tasks.filter((t) => t.itemId === id);
-  const ctx = () => ({ cats: S.categories, words: S.words, rules: S.rules, max: S.settings.surveyMax, editStyle: S.settings.editStyle, noTags: true });
+  const memoryTexts = () => S.memory.map((m) => m.text).filter(Boolean).concat(S.rules.filter(Boolean));
+  const ctx = () => ({ cats: S.categories, words: S.words, rules: memoryTexts(), memory: memoryTexts(), max: S.settings.surveyMax, editStyle: S.settings.editStyle, noTags: true });
   const prompt = (k) => S.prompts[k] || C.DEFAULT_PROMPTS[k];
 
   function noteStatus(n) {
@@ -412,6 +415,7 @@
       let starts;
       try {
         const p = C.buildSplitPrompt(prompt('split'), blocks, win);
+        if (note.instruction) p.system += '\n\nExtra instruction from the person for this note: ' + note.instruction;
         const a = await aiJSON('split', p.system, p.user, note.name); starts = a.data.starts; splitMs += a.ms;
         if (a.thinking) thoughts.push(a.thinking);
       } catch (e) { if (e.name === 'AbortError' || e.conn) throw e; starts = win.map((_, k) => k + 1); }
@@ -485,6 +489,7 @@
   const SERIOUS = ['shortened', 'lostword', 'bigchange', 'numbers', 'negation'];
   async function organizeOne(it) {
     const c = ctx(); const p = C.buildOrganizePrompt(prompt('organize'), it.original, c);
+    const ins = (noteOf(it) || {}).instruction; if (ins) p.system += '\n\nExtra instruction from the person for this note: ' + ins;
     const nm = (noteOf(it) || {}).name;
     const a1 = await aiJSON('organize', p.system, p.user, nm);
     let chk = C.checkOrganize(a1.data, it.original, c); let thinking = a1.thinking; let ms = a1.ms; let cut = a1.cut;
@@ -667,13 +672,14 @@
     if (S.survey) h += navBtn('survey', '❓ Questions for you', `<span class="badge warn">${S.survey.questions.length}</span>`);
     h += navBtn('review', '✔ Review', review ? `<span class="badge warn">${review}</span>` : '');
     h += navBtn('todo', '☑ To-do', `<span class="cnt">${openTaskCount()}</span>`);
+    h += navBtn('chat', '💬 Chat', `<span class="cnt">${S.chats.length || ''}</span>`);
     h += '<div class="sec">Categories</div>';
     for (const c of S.categories.filter((x) => !x.parent && x.id !== 'todo')) {
       h += navBtn('cat:' + c.id, esc(c.name), `<span class="cnt">${itemsIn(c.id).length}</span>`);
       for (const k of C.children(cats(), c.id)) h += navBtn('cat:' + k.id, esc(k.name), `<span class="cnt">${itemsIn(k.id).length}</span>`, 'sub');
     }
     h += '<div class="sec">You</div>';
-    h += navBtn('words', '🔤 My words &amp; rules', `<span class="cnt">${S.words.length}</span>`);
+    h += navBtn('words', '🧠 Memory &amp; words', `<span class="cnt">${S.memory.length + S.words.length}</span>`);
     h += navBtn('settings', '⚙ Settings');
     $('#nav').innerHTML = h;
   }
@@ -684,7 +690,8 @@
     if (v === 'review') return 'Review';
     if (v === 'survey') return 'Questions for you';
     if (v === 'todo') return 'To-do';
-    if (v === 'words') return 'My words & rules';
+    if (v === 'words') return 'Memory & words';
+    if (v === 'chat') return 'Chat';
     if (v === 'settings') return 'Settings';
     if (v.startsWith('cat:')) return C.catPath(cats(), v.slice(4));
     return '';
@@ -703,7 +710,8 @@
 
   function renderContent() {
     const el = $('#content'); const v = UI.view;
-    el.className = 'content' + (v === 'inbox' ? ' flush' : '');
+    el.className = 'content' + (v === 'inbox' || v === 'chat' ? ' flush' : '');
+    if (v === 'chat') { el.innerHTML = viewChat(); scrollChat(); return; }
     if (v === 'inbox') el.innerHTML = viewInbox();
     else if (v === 'review') el.innerHTML = viewReview();
     else if (v === 'survey') el.innerHTML = viewSurvey();
@@ -736,6 +744,7 @@
           <button class="btn small" data-act="report" data-id="${esc(n.id)}" title="Copy what Mind Desk shows for this note, to paste into a chat with Claude">📋 Report for Claude</button>
           <button class="btn small danger" data-act="deleteNote" data-id="${esc(n.id)}">Delete</button></div>
         <div class="muted small" style="margin-bottom:8px">Added ${esc(fmtTime(n.addedAt))} · ${n.text.length.toLocaleString()} characters · ${n.source === 'file' ? 'from a file' : 'pasted'}</div>
+        ${n.instruction ? `<div class="banner info small">Your instruction for this note: <i>${esc(n.instruction)}</i> <a href="#" data-act="clearInstruction" data-id="${esc(n.id)}">remove</a></div>` : ''}
         <div class="notebody pre">${esc(n.text)}</div>${thinkBox(n.splitThinking, 'Show how the AI decided to split this note')}`;
       const st = { pending: '<span class="chip warn">Waiting</span>', review: '<span class="chip warn">To review</span>', approved: '<span class="chip good">Done</span>' };
       right = `<h2 style="font-size:15px;margin:0 0 10px">What the AI made</h2>` + (its.length ? its.map((i) => `<div class="mini" data-act="openItem" data-id="${esc(i.id)}">
@@ -798,6 +807,7 @@
         <div class="itemhead"><div class="grow"><h3>${esc(it.title)}</h3><div class="meta">${esc(n ? n.name : '')} · ${esc(C.fmtDate(it.createdAt))}${it.mode === 'careful' ? ' · 🧠 careful' : ''}</div></div>
           <select data-change="setCat" data-id="${esc(it.id)}" aria-label="Category">${catOptions(it.cat)}</select></div>
         <div class="row" style="margin-top:6px">${it.tags.map((t) => `<span class="chip acc">also: ${esc(C.catPath(cats(), t))}</span>`).join(' ')} ${flagChips(it)}</div>
+        ${UI.teach && UI.teach.itemId === it.id ? `<div class="acard mem" style="margin-top:8px"><div class="small muted">You moved this item. Teach Mind Desk so it does this itself next time? (edit the sentence if you like)</div><div class="row" style="margin-top:4px"><input type="text" id="teachText" value="${esc(UI.teach.text)}" style="flex:1"><button class="btn small primary" data-act="saveTeach">Remember</button><button class="btn small" data-act="skipTeach">No thanks</button></div></div>` : ''}
         <div class="cmp"><div><div class="lbl">Your original</div><div class="pre">${d.left}</div></div><div><div class="lbl">Cleaned by AI</div><div class="pre">${d.right}</div></div></div>
         ${tasksPreview(it)}${thinkBox(it.thinking)}
         <div class="actions"><button class="btn primary" data-act="approve" data-id="${esc(it.id)}">✓ Approve</button>
@@ -814,7 +824,7 @@
   function viewSurvey() {
     if (!S.survey) return '<div class="empty"><b>No questions right now</b>When you organize new notes, the AI may ask about words or notes it does not understand.</div>';
     const qs = S.survey.questions; const draft = S.survey.draft || {};
-    return `<p class="hint">The AI found ${qs.length} thing(s) it could not understand. Your answers are saved in <b>My words &amp; rules</b> and used every time from now on. Leave a box empty to skip it.</p>
+    return `<p class="hint">The AI found ${qs.length} thing(s) it could not understand. Your answers are saved in <b>Memory &amp; words</b> and used every time from now on. Leave a box empty to skip it.</p>
       ${qs.map((q, k) => q.kind === 'word'
     ? `<div class="q"><label for="sq${k}"><b>What does “${esc(q.term)}” mean?</b></label>
           <div class="row" style="margin-top:6px"><input type="text" id="sq${k}" data-q="${esc(q.id)}" value="${esc(draft[q.id] || '')}" style="flex:1;min-width:240px" placeholder="${esc(q.guess ? 'AI guess: ' + q.guess : 'Your meaning')}">
@@ -878,14 +888,73 @@
 
   /* ---------- words ---------- */
   function viewWords() {
-    return `<div class="box"><h2>My words</h2><p class="hint">Your shortcodes, names and private words. The AI keeps them unchanged and uses the meaning to understand your notes.</p>
+    const total = memoryTexts().join(' ').length;
+    const src = { chat: 'from chat', review: 'from a correction', question: 'from a question', rule: 'was a rule', manual: '' };
+    return `<div class="box"><h2>🧠 Memory</h2><p class="hint">What Mind Desk knows about you: your intent, where kinds of notes belong, how you write. It is sent to the AI every time (organizing, questions, chat, Fix my typing), whichever model you use. Short sentences work best.</p>
+      ${S.memory.length ? '' : '<p class="muted">Nothing yet. Tell the chat “remember: …”, correct a category in Review, or add one here.</p>'}
+      ${S.memory.map((m) => `<div class="row" style="margin-bottom:6px"><input type="text" data-mem="${esc(m.id)}" value="${esc(m.text)}" style="flex:1" aria-label="Memory">${src[m.source] ? `<span class="chip">${esc(src[m.source])}</span>` : ''}<button class="btn small link" data-act="delMem" data-id="${esc(m.id)}" title="Delete">✕</button></div>`).join('')}
+      <button class="btn" data-act="addMem">＋ Add</button>
+      ${total > 3000 ? `<div class="banner" style="margin-top:10px">Memory is getting long (${total.toLocaleString()} characters). Long memory makes every AI request slower. Merge or delete entries you no longer need.</div>` : ''}</div>
+      <div class="box"><h2>My words</h2><p class="hint">Your shortcodes, names and private words. The AI keeps them unchanged and uses the meaning to understand your notes.</p>
       <table class="words"><thead><tr><th style="width:28%">Word</th><th>Meaning</th><th style="width:40px"></th></tr></thead><tbody>
       ${S.words.map((w) => `<tr><td><input type="text" data-word="${esc(w.id)}" data-wf="term" value="${esc(w.term)}" style="width:100%"></td><td><input type="text" data-word="${esc(w.id)}" data-wf="meaning" value="${esc(w.meaning)}" style="width:100%"></td>
         <td><button class="btn small link" data-act="delWord" data-id="${esc(w.id)}" title="Delete">✕</button></td></tr>`).join('')}
-      </tbody></table><div style="margin-top:10px"><button class="btn" data-act="addWord">＋ Add word</button></div></div>
-      <div class="box"><h2>My rules</h2><p class="hint">Simple rules in your own words, for example: “anything about plugins or sites goes to My business”.</p>
-      ${S.rules.map((r, k) => `<div class="row" style="margin-bottom:6px"><input type="text" data-rule="${k}" value="${esc(r)}" style="flex:1"><button class="btn small link" data-act="delRule" data-k="${k}" title="Delete">✕</button></div>`).join('')}
-      <button class="btn" data-act="addRule">＋ Add rule</button></div>`;
+      </tbody></table><div style="margin-top:10px"><button class="btn" data-act="addWord">＋ Add word</button></div></div>`;
+  }
+
+  /* ---------- chat ---------- */
+  const curChat = () => S.chats.find((c) => c.id === UI.chatId) || null;
+  function chatRichText(t) {
+    return esc(t).replace(/\[\[(item|note):([A-Za-z0-9_-]{1,64})\]\]/g, (m, kind, id) => {
+      if (kind === 'item') { const it = S.items.find((i) => i.id === id); return it ? `<a href="#" data-act="openItem" data-id="${esc(id)}">${esc(it.title || 'item')}</a>` : '(item not found)'; }
+      const n = S.notes.find((x) => x.id === id); return n ? `<a href="#" data-act="openNote" data-id="${esc(id)}">note “${esc(n.name)}”</a>` : '(note not found)';
+    }).replace(/\*\*([^*\n]{1,200})\*\*/g, '<b>$1</b>');
+  }
+  function actionText(a) {
+    const it = a.item ? S.items.find((i) => i.id === a.item) : null; const t = a.task ? S.tasks.find((x) => x.id === a.task) : null; const n = a.note ? S.notes.find((x) => x.id === a.note) : null;
+    const q = (x) => `“${esc(x)}”`;
+    if (a.type === 'move_item') return `Move ${q(it ? it.title : '?')} to <b>${esc(C.catPath(cats(), a.category))}</b>`;
+    if (a.type === 'rename_item') return `Rename ${q(it ? it.title : '?')} to ${q(a.title)}`;
+    if (a.type === 'mark_task') return `Mark task ${q(t ? t.text : '?')} as <b>${a.done ? 'done' : 'not done'}</b>`;
+    if (a.type === 'add_task') return `Add task ${q(a.text)} to <b>${esc(C.catPath(cats(), a.category))}</b>`;
+    if (a.type === 'organize_again') { const k = n ? S.items.filter((i) => i.noteId === n.id).length : 0; return `Organize note ${q(n ? n.name : '?')} again${a.instruction ? ` with: <i>${esc(a.instruction)}</i>` : ''}<br><span class="muted small">This replaces the ${k} item(s) made from it, also approved ones.</span>`; }
+    return '';
+  }
+  function notePreview(id) {
+    const n = S.notes.find((x) => x.id === id); if (!n) return '';
+    const its = S.items.filter((i) => i.noteId === n.id).sort((a, b) => a.order - b.order);
+    return `<div class="acard"><div><b>Note “${esc(n.name)}”</b> · ${its.length ? its.length + ' item(s)' : 'not organized yet'} · <a href="#" data-act="openNote" data-id="${esc(n.id)}">open in Inbox</a></div>
+      ${its.map((i) => `<div class="small" style="margin-top:4px">• <a href="#" data-act="openItem" data-id="${esc(i.id)}">${esc(i.title || i.original.slice(0, 50))}</a> <span class="muted">— ${esc(C.catPath(cats(), i.cat))}${i.status === 'review' ? ', waiting for review' : ''}</span></div>`).join('')}</div>`;
+  }
+  function msgHtml(c, m) {
+    if (m.role === 'user') return `<div class="msg me"><div class="bubble pre">${esc(m.text)}</div></div>`;
+    const acts = (m.actions || []).map((a) => {
+      if (a.type === 'show_note') return notePreview(a.note);
+      const st = a.status === 'pending' ? `<button class="btn small primary" data-act="applyAction" data-c="${esc(c.id)}" data-m="${esc(m.id)}" data-a="${esc(a.id)}">Apply</button><button class="btn small" data-act="cancelAction" data-c="${esc(c.id)}" data-m="${esc(m.id)}" data-a="${esc(a.id)}">Cancel</button>`
+        : `<span class="chip ${a.status === 'applied' ? 'good' : a.status === 'failed' ? 'bad' : ''}">${a.status === 'applied' ? '✓ Applied' : a.status === 'failed' ? 'Could not apply: ' + esc(a.result || '') : 'Cancelled'}</span>`;
+      return `<div class="acard"><div>${actionText(a)}</div><div class="row" style="margin-top:6px">${st}</div></div>`;
+    }).join('');
+    const rem = (m.remember || []).map((r) => r.status === 'pending'
+      ? `<div class="acard mem"><div class="small muted">Remember this from now on?</div><div class="row" style="margin-top:4px"><input type="text" data-remtext="${esc(r.id)}" value="${esc(r.text)}" style="flex:1"><button class="btn small primary" data-act="saveRemember" data-c="${esc(c.id)}" data-m="${esc(m.id)}" data-r="${esc(r.id)}">Remember</button><button class="btn small" data-act="skipRemember" data-c="${esc(c.id)}" data-m="${esc(m.id)}" data-r="${esc(r.id)}">No</button></div></div>`
+      : `<div class="acard mem"><span class="chip ${r.status === 'saved' ? 'good' : ''}">${r.status === 'saved' ? '🧠 Remembered' : 'Not remembered'}</span> <span class="small">${esc(r.text)}</span></div>`).join('');
+    return `<div class="msg ai"><div class="bubble${m.error ? ' err' : ''}"><div class="pre">${chatRichText(m.text)}</div>${acts}${rem}${m.dropped ? `<div class="muted small" style="margin-top:6px">${m.dropped} suggestion(s) were left out because they pointed to notes that do not exist.</div>` : ''}${thinkBox(m.thinking)}</div></div>`;
+  }
+  function viewChat() {
+    if (!curChat() && S.chats.length && UI.chatId !== 'new') UI.chatId = S.chats[S.chats.length - 1].id;
+    const c = curChat();
+    const list = [...S.chats].reverse().map((x) => `<div class="noteitem${c && x.id === c.id ? ' on' : ''}" data-act="openChat" data-id="${esc(x.id)}"><div class="row"><div class="nm" style="flex:1">${esc(x.title)}</div><button class="btn small link" data-act="delChat" data-id="${esc(x.id)}" title="Delete this chat">✕</button></div><div class="sub">${esc(fmtTime(x.updatedAt || x.createdAt))}</div></div>`).join('');
+    const ex = ['What are my job to-dos?', 'Show me how you organized note “' + ((S.notes[S.notes.length - 1] || {}).name || '1') + '”', 'Remember: BR is my client, not my own business', 'Move my gym notes to Personal goals'];
+    const msgs = c && c.messages.length ? c.messages.map((m) => msgHtml(c, m)).join('') + (RUN.active && RUN.chatId === c.id ? '<div class="msg ai"><div class="bubble muted">…</div></div>' : '')
+      : `<div class="empty"><b>Chat with Mind Desk</b>Ask about your notes, tell it what to change, or teach it how you think and write. It never changes anything until you click <b>Apply</b>.<div class="row" style="justify-content:center;margin-top:14px">${ex.map((e) => `<button class="btn small" data-act="chatExample">${esc(e)}</button>`).join('')}</div></div>`;
+    return `<div class="pane list chatlist"><div class="tools"><button class="btn" data-act="newChat">＋ New chat</button></div>${list || '<p class="muted small" style="padding:12px">Your chats are saved here.</p>'}</div>
+      <div class="chatmain"><div class="msgs" id="msgs">${msgs}</div>
+      <div class="composer"><textarea id="chatIn" rows="2" placeholder="Ask about your notes, or tell Mind Desk what to change… (Enter = send, Shift+Enter = new line)">${esc(UI.chatDraft || '')}</textarea><button class="btn primary" data-act="sendChat" ${RUN.active ? 'disabled' : ''}>Send</button></div>
+      <div class="muted small" style="padding:0 16px 10px">${S.settings.provider === 'manual' ? 'Copy & paste mode: your message goes to ChatGPT or Claude.' : (S.settings.mode === 'careful' ? '🧠 Careful: the AI thinks first (slower).' : '⚡ Fast answers.') + ' Change it at the top right.'} Memory: ${S.memory.length} item(s).</div></div>`;
+  }
+  function scrollChat() { const m = $('#msgs'); if (m) m.scrollTop = m.scrollHeight; }
+  function findAction(el) {
+    const c = S.chats.find((x) => x.id === el.dataset.c); const m = c && c.messages.find((x) => x.id === el.dataset.m);
+    return { c, m, a: m && (m.actions || []).find((x) => x.id === el.dataset.a), r: m && (m.remember || []).find((x) => x.id === el.dataset.r) };
   }
 
   /* ---------- settings ---------- */
@@ -962,7 +1031,7 @@
       <div class="row" style="margin-top:12px"><input type="text" id="newCatName" placeholder="New category name"><select id="newCatParent"><option value="">(top level)</option>${tops.filter((t) => t.id !== 'unsorted').map((t) => `<option value="${esc(t.id)}">under ${esc(t.name)}</option>`).join('')}</select><button class="btn" data-act="addCat">＋ Add</button></div></div>`;
   }
   function promptEditor() {
-    const names = { split: 'Step 1: split notes', survey: 'Step 2: questions', organize: 'Step 3: organize', fix: '✨ Fix my typing (editor)' };
+    const names = { split: 'Step 1: split notes', survey: 'Step 2: questions', organize: 'Step 3: organize', fix: '✨ Fix my typing (editor)', chat: '💬 Chat' };
     return `<div class="box"><h2>AI instructions (advanced)</h2><details><summary>Show and edit the prompts</summary>
       <p class="hint">Change these to tune how the AI behaves. Keep the parts in {{double braces}} and the JSON format line.</p>
       ${Object.keys(names).map((k) => `<div class="field"><label for="pr-${k}"><b>${names[k]}</b>${S.prompts[k] ? ' <span class="chip warn">edited</span>' : ''}</label>
@@ -1150,6 +1219,73 @@
         try { const dir = await FOLDER.handle.getDirectoryHandle('Reports', { create: true }); await writeFile(dir, name, make()); toast('Saved in your folder: Reports\\' + name, 6000); } catch (e) { showError(e); }
       };
     },
+    clearInstruction(el) { const n = S.notes.find((x) => x.id === el.dataset.id); if (n) { delete n.instruction; save(); renderContent(); } },
+    newChat() { UI.chatId = 'new'; UI.chatDraft = ''; renderContent(); const t = $('#chatIn'); if (t) t.focus(); },
+    openChat(el, e) { if (e && e.target.closest('[data-act=delChat]')) return; UI.chatId = el.dataset.id; renderContent(); },
+    delChat(el, e) {
+      if (e) e.stopPropagation(); if (busy()) return;
+      if (!window.confirm('Delete this chat? Things you chose to remember stay in Memory.')) return;
+      S.chats = S.chats.filter((c) => c.id !== el.dataset.id); if (UI.chatId === el.dataset.id) UI.chatId = null; save(); render();
+    },
+    chatExample(el) { const t = $('#chatIn'); if (t) { t.value = el.textContent; UI.chatDraft = t.value; t.focus(); } },
+    openNote(el, e) { if (e) e.preventDefault(); UI.view = 'inbox'; UI.selNote = el.dataset.id; render(); },
+    async sendChat() {
+      if (busy()) return;
+      const box = $('#chatIn'); const text = (box ? box.value : '').trim(); if (!text) return;
+      let c = curChat();
+      if (!c) { c = { id: C.uid('c'), title: text.replace(/\s+/g, ' ').slice(0, 60), createdAt: Date.now(), updatedAt: Date.now(), messages: [] }; S.chats.push(c); UI.chatId = c.id; }
+      const history = { messages: c.messages.slice() };
+      c.messages.push({ id: C.uid('u'), role: 'user', text, at: Date.now() }); c.updatedAt = Date.now();
+      UI.chatDraft = ''; RUN.active = true; RUN.stop = false; RUN.mode = S.settings.mode; RUN.chatId = c.id;
+      save(); render(); setProgress(RUN.mode === 'careful' ? 'Thinking about your message' : 'Answering', 0, 0);
+      const out = { id: C.uid('a'), role: 'assistant', text: '', at: 0 };
+      try {
+        const p = C.buildChatPrompt(prompt('chat'), S, history, text, ctx());
+        let data; let thinking = '';
+        if (S.settings.provider === 'manual') data = await askManual('Chat: your message for ChatGPT or Claude', p.system + '\n\n' + p.user);
+        else { const a = await aiJSON('chat', p.system, p.user, 'chat'); data = a.data; thinking = a.thinking; }
+        const acts = C.checkChatActions(data.actions, S, p.ids);
+        out.text = String(data.reply || '').trim() || (acts.actions.length ? 'Here is what I suggest:' : '(no answer)');
+        if (thinking) out.thinking = thinking.slice(0, 20000);
+        out.actions = acts.actions.map((a) => Object.assign({ id: C.uid('x'), status: a.type === 'show_note' ? 'shown' : 'pending' }, a));
+        out.remember = C.checkRemember(data.remember, S.memory).map((t) => ({ id: C.uid('r'), text: t, status: 'pending' }));
+        if (acts.dropped) out.dropped = acts.dropped;
+      } catch (e) {
+        out.text = e.name === 'AbortError' ? '(stopped)' : 'Sorry, that did not work: ' + e.message; out.error = e.name !== 'AbortError';
+      } finally {
+        out.at = Date.now();
+        if (S.chats.includes(c)) { c.messages.push(out); if (c.messages.length > 500) c.messages.splice(0, c.messages.length - 500); c.updatedAt = Date.now(); }
+        RUN.active = false; RUN.chatId = null; save(); render();
+      }
+    },
+    applyAction(el) {
+      if (busy()) return;
+      const { c, m, a } = findAction(el); if (!a || a.status !== 'pending') return;
+      const it = a.item ? S.items.find((i) => i.id === a.item) : null; const t = a.task ? S.tasks.find((x) => x.id === a.task) : null; const n = a.note ? S.notes.find((x) => x.id === a.note) : null;
+      const fail = (why) => { a.status = 'failed'; a.result = why; save(); render(); };
+      if (a.type === 'move_item') { if (!it || !cat(a.category)) return fail('the item or category no longer exists'); it.cat = a.category; it.flags = it.flags.filter((f) => f !== 'unsorted'); it.updatedAt = Date.now(); }
+      else if (a.type === 'rename_item') { if (!it) return fail('the item no longer exists'); it.title = a.title; }
+      else if (a.type === 'mark_task') { if (!t) return fail('the task no longer exists'); t.done = !!a.done; t.doneAt = t.done ? Date.now() : null; }
+      else if (a.type === 'add_task') S.tasks.push({ id: C.uid('t'), itemId: null, text: a.text, done: false, cat: cat(a.category) ? a.category : 'todo', createdAt: Date.now() });
+      else if (a.type === 'organize_again') {
+        if (!n) return fail('the note no longer exists');
+        n.instruction = a.instruction || undefined;
+        removeItems(S.items.filter((i) => i.noteId === n.id).map((i) => i.id)); n.status = 'new';
+        a.status = 'applied'; save(); render(); toast('Organizing the note again…'); organizeAll([n.id]); return;
+      }
+      a.status = 'applied'; save(); render();
+    },
+    cancelAction(el) { const { a } = findAction(el); if (a && a.status === 'pending') { a.status = 'cancelled'; save(); render(); } },
+    saveRemember(el) {
+      const { r } = findAction(el); if (!r || r.status !== 'pending') return;
+      const inp = $(`[data-remtext="${CSS.escape(r.id)}"]`); const text = ((inp && inp.value) || r.text).trim(); if (!text) return;
+      r.text = text; r.status = 'saved'; S.memory.push({ id: C.uid('m'), text, at: Date.now(), source: 'chat' }); save(); render(); toast('Saved in Memory.');
+    },
+    skipRemember(el) { const { r } = findAction(el); if (r && r.status === 'pending') { r.status = 'cancelled'; save(); render(); } },
+    saveTeach() { const v = ($('#teachText') || {}).value; if (v && v.trim()) { S.memory.push({ id: C.uid('m'), text: v.trim(), at: Date.now(), source: 'review' }); toast('Saved in Memory. The AI will use it from now on.'); } UI.teach = null; save(); render(); },
+    skipTeach() { UI.teach = null; renderContent(); },
+    addMem() { S.memory.push({ id: C.uid('m'), text: 'New memory: edit me', at: Date.now(), source: 'manual' }); save(); renderContent(); const ins = $$('[data-mem]'); if (ins.length) { ins[ins.length - 1].focus(); ins[ins.length - 1].select(); } },
+    delMem(el) { S.memory = S.memory.filter((m) => m.id !== el.dataset.id); save(); render(); },
     deleteItem(el) { if (busy()) return; if (!window.confirm('Delete this item and its tasks? (Your original note stays in the Inbox.)')) return; removeItems([el.dataset.id]); save(); render(); },
     flaggedOnly(el) { UI.flaggedOnly = el.checked; renderContent(); },
     toggleTask(el) { const t = S.tasks.find((x) => x.id === el.dataset.id); t.done = el.checked; t.doneAt = t.done ? Date.now() : null; save(); render(); },
@@ -1170,7 +1306,7 @@
           const ex = S.words.find((w) => w.term.toLowerCase() === q.term.toLowerCase());
           const meaning = v.trim() === '(keep as is)' ? '' : v.trim();
           if (ex) ex.meaning = meaning; else S.words.push({ id: C.uid('w'), term: q.term, meaning });
-        } else S.rules.push(`About “${q.quote}”: ${v.trim()}`);
+        } else S.memory.push({ id: C.uid('m'), text: `About “${q.quote}”: ${v.trim()}`, at: Date.now(), source: 'question' });
       }
       finishSurvey();
     },
@@ -1301,7 +1437,12 @@
         if (k === 'model' || k === 'ollamaUrl' || k === 'oaUrl') { UI.connResult = ''; renderContent(); }
         return;
       }
-      if (el.dataset.change === 'setCat') { const it = S.items.find((i) => i.id === el.dataset.id); it.cat = el.value; it.tags = it.tags.filter((t) => t !== it.cat); it.flags = it.flags.filter((f) => f !== 'unsorted'); save(); render(); return; }
+      if (el.dataset.change === 'setCat') {
+        const it = S.items.find((i) => i.id === el.dataset.id); const from = it.cat; it.cat = el.value; it.tags = it.tags.filter((t) => t !== it.cat); it.flags = it.flags.filter((f) => f !== 'unsorted');
+        if (from !== it.cat && it.cat !== 'unsorted') UI.teach = { itemId: it.id, text: `Notes like “${it.title}” belong in ${C.catPath(cats(), it.cat)}, not ${C.catPath(cats(), from)}.` };
+        save(); render(); return;
+      }
+      if (el.dataset.mem) { const m = S.memory.find((x) => x.id === el.dataset.mem); if (m) { if (el.value.trim()) m.text = el.value.trim(); else el.value = m.text; save(); } return; }
       if (el.dataset.word) { const w = S.words.find((x) => x.id === el.dataset.word); if (w) { w[el.dataset.wf] = el.value.trim(); save(); renderSide(); } return; }
       if (el.dataset.rule !== undefined) { S.rules[+el.dataset.rule] = el.value.trim(); save(); return; }
       if (el.dataset.catf) {
@@ -1317,10 +1458,12 @@
     document.addEventListener('input', (e) => {
       if (e.target.id === 'search') { UI.search = e.target.value; renderContent(); return; }
       if (e.target.dataset && e.target.dataset.q) { draftAnswer(e.target.dataset.q, e.target.value); return; }
+      if (e.target.id === 'chatIn') { UI.chatDraft = e.target.value; return; }
       if (e.target.closest && e.target.closest('#editor')) { UI.dirty = true; captureDraft(); }
     });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && $('#overlay') && !$('#mpPrompt')) closeModal();
+      if (e.key === 'Enter' && !e.shiftKey && e.target.id === 'chatIn') { e.preventDefault(); ACT.sendChat(); return; }
       if (e.key === 'Enter' && e.target.dataset && e.target.dataset.newtask) { const b = e.target.parentElement.querySelector('[data-act=addTask]'); if (b) b.click(); }
     });
     const drop = $('#drop'); let depth = 0;

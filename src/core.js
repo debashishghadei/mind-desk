@@ -69,7 +69,33 @@ Answer only with JSON: {"title":"","category":"","tasks":[{"text":"","done":fals
 Keep these words exactly as written: {{protected}}
 What the person's words mean:
 {{words}}
+About the person and how they write:
+{{rules}}
 Answer only with JSON: {"text":""}`,
+    chat:
+`You are the assistant inside Mind Desk, a private notes app on the person's own PC. You help the person with their own notes: you answer questions about them and suggest changes.
+You never change anything yourself. You suggest actions, and the person clicks Apply.
+Talk simply and briefly, like a helpful friend, in plain English. If you are not sure what the person means, ask one short question instead of guessing.
+What you remember about the person (Memory):
+{{memory}}
+What the person's words mean:
+{{words}}
+Categories (id: name - meaning):
+{{categories}}
+To-do lists (id: name):
+{{todoCategories}}
+Notes, items and tasks Mind Desk found for this message (only these exist for you; use their ids):
+{{context}}
+Actions you can suggest (use only ids from the lists above):
+{"type":"move_item","item":"ITEM ID","category":"CATEGORY ID"}
+{"type":"rename_item","item":"ITEM ID","title":"NEW TITLE"}
+{"type":"mark_task","task":"TASK ID","done":true}
+{"type":"add_task","text":"TASK","category":"TO-DO ID"}
+{"type":"organize_again","note":"NOTE ID","instruction":"what to do differently"}
+{"type":"show_note","note":"NOTE ID"}
+"remember": things the person told you that should be used from now on: what their words or notes mean, where kinds of notes belong, how they write and talk. Only when they clearly say something lasting. Write each as one short sentence about the person.
+In "reply" you can point to items with [[item:ID]] and to notes with [[note:ID]].
+Answer only with JSON: {"reply":"","actions":[],"remember":[]}`,
   };
   /** how much the AI may change the person's text (Settings → writing) */
   const EDIT_RULES = {
@@ -85,6 +111,15 @@ Answer only with JSON: {"text":""}`,
       required: ['questions'],
     },
     fix: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+    chat: {
+      type: 'object',
+      properties: {
+        reply: { type: 'string' },
+        actions: { type: 'array', items: { type: 'object', properties: { type: { type: 'string', enum: ['move_item', 'rename_item', 'mark_task', 'add_task', 'organize_again', 'show_note'] }, item: { type: 'string' }, category: { type: 'string' }, title: { type: 'string' }, task: { type: 'string' }, done: { type: 'boolean' }, text: { type: 'string' }, note: { type: 'string' }, instruction: { type: 'string' } }, required: ['type'] } },
+        remember: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['reply', 'actions', 'remember'],
+    },
     organize: {
       type: 'object',
       properties: {
@@ -214,7 +249,7 @@ Answer only with JSON: {"text":""}`,
   const editRule = (ctx) => EDIT_RULES[ctx.editStyle] || EDIT_RULES.typos;
   function buildFixPrompt(tpl, text, ctx) {
     const prot = protectedTerms(text, ctx.words);
-    return { system: fill(tpl, { editRule: 'Return ' + editRule(ctx).replace(/^the SAME/, 'the same'), protected: prot.length ? prot.join(', ') : '(none)', words: wordLines(ctx.words) }), user: 'Text:\n<<<\n' + text + '\n>>>' };
+    return { system: fill(tpl, { editRule: 'Return ' + editRule(ctx).replace(/^the SAME/, 'the same'), protected: prot.length ? prot.join(', ') : '(none)', words: wordLines(ctx.words), rules: ruleLines(ctx.rules || []) }), user: 'Text:\n<<<\n' + text + '\n>>>' };
   }
   function buildOrganizePrompt(tpl, text, ctx) {
     const prot = protectedTerms(text, ctx.words);
@@ -533,6 +568,7 @@ Answer only with JSON: {"text":""}`,
     const optStr = (v) => v === undefined || v === null || str(v);
     if (o.items.some((it) => !optStr(it.thinking) || !(it.mode === undefined || ['fast', 'careful'].includes(it.mode)))) return 'An item has damaged AI thinking.';
     if (o.notes.some((n) => !optStr(n.splitThinking))) return 'A note has damaged AI thinking.';
+    if (o.notes.some((n) => !optStr(n.instruction))) return 'A note has a damaged instruction.';
     if (o.survey && !optStr(o.survey.thinking)) return 'The open questions in the backup are damaged.';
     const catIds = new Set(o.categories.map((c) => c.id)); const noteIds = new Set(o.notes.map((n) => n.id)); const itemIds = new Set(o.items.map((i) => i.id));
     for (const c of o.categories) {
@@ -549,9 +585,116 @@ Answer only with JSON: {"text":""}`,
     }
     if (o.words !== undefined && (!Array.isArray(o.words) || o.words.some((w) => !isObj(w) || !str(w.term) || !(w.meaning === undefined || str(w.meaning)) || !(w.id === undefined || (str(w.id) && ID.test(w.id)))))) return 'The word list is damaged.';
     if (o.rules !== undefined && (!Array.isArray(o.rules) || o.rules.some((r) => !str(r)))) return 'The rule list is damaged.';
+    if (o.memory !== undefined && (!Array.isArray(o.memory) || o.memory.some((m) => !isObj(m) || !str(m.id) || !ID.test(m.id) || !str(m.text) || !(m.at === undefined || typeof m.at === 'number')))) return 'The memory list is damaged.';
+    if (o.chats !== undefined) {
+      if (!Array.isArray(o.chats)) return 'The chats in the backup are damaged.';
+      const seenChat = new Set();
+      for (const c of o.chats) {
+        if (!isObj(c) || !str(c.id) || !ID.test(c.id) || seenChat.has(c.id) || !str(c.title) || !Array.isArray(c.messages)) return 'A chat in the backup is damaged.';
+        seenChat.add(c.id);
+        for (const m of c.messages) {
+          if (!isObj(m) || !str(m.id) || !ID.test(m.id) || !['user', 'assistant'].includes(m.role) || !str(m.text) || !optStr(m.thinking)) return 'A chat message in the backup is damaged.';
+          if (m.actions !== undefined && (!Array.isArray(m.actions) || m.actions.some((a) => !isObj(a) || !str(a.id) || !ID.test(a.id) || !str(a.type) || !['pending', 'applied', 'cancelled', 'failed', 'shown'].includes(a.status)))) return 'A chat action in the backup is damaged.';
+          if (m.remember !== undefined && (!Array.isArray(m.remember) || m.remember.some((r) => !isObj(r) || !str(r.id) || !ID.test(r.id) || !str(r.text) || !['pending', 'saved', 'cancelled'].includes(r.status)))) return 'A chat memory card in the backup is damaged.';
+        }
+      }
+    }
     return '';
   }
   function validBackup(o) { return !backupProblem(o); }
+
+  /* ---------- chat ---------- */
+  const CHAT_STOP = new Set('a an the and or but so if to of on in at for with from by about is are was were be been am i me my mine you your we our it its this that these those what which who how why when where can could should would will do does did done have has had not no yes please show tell give find list all any some my notes note items item there here them they than then just also more most very really haha ok okay now today'.split(' '));
+  const chatWords = (t) => [...new Set((String(t).toLowerCase().match(/[a-z0-9]+/g) || []).filter((w) => w.length >= 2 && !CHAT_STOP.has(w)))];
+  const wordHit = (w, text) => { const tw = text.toLowerCase().match(/[a-z0-9]+/g) || []; return tw.some((x) => x === w || (w.length >= 4 && x.length >= 4 && x.slice(0, 4) === w.slice(0, 4))); };
+  const TODO_WORDS = /\b(to-?dos?|tasks?|chores?|shopping|buy|pending|open|done|finish(ed)?|tick)\b/i;
+  /**
+   * What Mind Desk shows the AI for one chat message: a short overview, the notes the person named,
+   * the best matching items and (when asked about to-dos) the tasks. Kept small for local models.
+   * Returns {text, ids:{notes, items, tasks}}
+   */
+  function buildChatContext(state, message, recent) {
+    const cats = state.categories; const q = String(message) + ' ' + (recent || '');
+    const words = chatWords(q); const lower = q.toLowerCase();
+    const ids = { notes: new Set(), items: new Set(), tasks: new Set() };
+    const L = [];
+    const visibleItems = state.items.filter((i) => i.status !== 'pending');
+    // notes named in the message ("note 4", "Notepad tab 3", "4")
+    const named = state.notes.filter((n) => {
+      const nm = n.name.toLowerCase().trim(); if (!nm) return false;
+      if (/^\d+$/.test(nm)) return new RegExp('\\bnote\\s*#?\\s*' + nm + '\\b|"' + nm + '"|“' + nm + '”').test(lower);
+      return lower.includes(nm) || (nm.length > 3 && lower.includes('"' + nm));
+    });
+    L.push('Overview:');
+    L.push('Notes: ' + state.notes.slice(-30).map((n) => `[${n.id}] "${n.name}" (${n.status === 'new' ? 'not organized' : state.items.filter((i) => i.noteId === n.id).length + ' items'})`).join('; '));
+    state.notes.slice(-30).forEach((n) => ids.notes.add(n.id));
+    L.push('Items per category: ' + assignableCats(cats).map((c) => `${catPath(cats, c.id)} ${visibleItems.filter((i) => i.cat === c.id).length}`).join(', '));
+    const itemLine = (it) => {
+      ids.items.add(it.id); const n = state.notes.find((x) => x.id === it.noteId);
+      const tx = it.text.length > 700 ? it.text.slice(0, 700) + ' …' : it.text;
+      return `ITEM [${it.id}] "${it.title}" · ${catPath(cats, it.cat)} · ${it.status === 'review' ? 'waiting for review' : 'approved'} · from note "${n ? n.name : '?'}" [${it.noteId}]\n${tx}`;
+    };
+    let budget = 9000;
+    for (const n of named.slice(0, 2)) {
+      ids.notes.add(n.id);
+      const its = visibleItems.filter((i) => i.noteId === n.id).sort((a, b) => a.order - b.order);
+      L.push('', `NOTE [${n.id}] "${n.name}" — ${its.length ? its.length + ' items:' : 'not organized yet. Original text:\n' + n.text.slice(0, 2000)}`);
+      for (const it of its) { const t = itemLine(it); if (budget - t.length < 0) break; budget -= t.length; L.push(t); }
+    }
+    // best matching other items
+    const scored = visibleItems.filter((it) => !ids.items.has(it.id)).map((it) => {
+      const cp = catPath(cats, it.cat);
+      let sc = 0; for (const w of words) { if (wordHit(w, it.title)) sc += 3; if (wordHit(w, cp)) sc += 2; if (wordHit(w, it.text)) sc += 1; }
+      return { it, sc };
+    }).filter((x) => x.sc > 0).sort((a, b) => b.sc - a.sc || b.it.updatedAt - a.it.updatedAt).slice(0, 8);
+    if (scored.length) L.push('', 'Items that match the message:');
+    for (const { it } of scored) { const t = itemLine(it); if (budget - t.length < 0) break; budget -= t.length; L.push(t); }
+    // tasks
+    const tasks = visibleTasks(state);
+    let tl = [];
+    if (TODO_WORDS.test(q)) {
+      const catHit = assignableCats(cats).concat(todoSubs(cats)).filter((c) => words.some((w) => wordHit(w, c.name)));
+      tl = tasks.filter((t) => !catHit.length || catHit.some((c) => t.cat === c.id || subtreeIds(cats, c.id).includes(t.cat) || todoSubs(cats).some((s) => s.id === t.cat && s.area === c.id)));
+      if (!tl.length) tl = tasks;
+    } else tl = tasks.filter((t) => words.some((w) => wordHit(w, t.text)));
+    tl = tl.slice(0, 40);
+    if (tl.length) L.push('', 'Tasks:');
+    for (const t of tl) { ids.tasks.add(t.id); L.push(`TASK [${t.id}] [${t.done ? 'x' : ' '}] ${t.text} · ${catPath(cats, t.cat)}`); }
+    return { text: L.join('\n'), ids };
+  }
+  function buildChatPrompt(tpl, state, chat, message, ctx) {
+    const hist = (chat.messages || []).slice(-10);
+    const recent = hist.filter((m) => m.role === 'user').slice(-2).map((m) => m.text).join(' ');
+    const c = buildChatContext(state, message, recent);
+    const mem = (ctx.memory || []).map((m) => '- ' + m).join('\n') || '(nothing yet)';
+    const system = fill(tpl, { memory: mem, words: wordLines(ctx.words), categories: catLines(ctx.cats), todoCategories: todoLines(ctx.cats), context: c.text });
+    let user = '';
+    if (hist.length) user += 'Earlier in this chat:\n' + hist.map((m) => (m.role === 'user' ? 'Person: ' : 'You: ') + String(m.text).slice(0, 1200)).join('\n') + '\n\n';
+    user += 'Person: ' + message;
+    return { system, user, ids: c.ids };
+  }
+  /** keep only actions that point to things that exist; returns {actions, dropped} */
+  function checkChatActions(list, state, ids) {
+    const out = []; let dropped = 0; const cats = state.categories;
+    const assign = assignableCats(cats).map((c) => c.id); const subs = todoSubs(cats).map((c) => c.id);
+    const item = (id) => state.items.find((i) => i.id === id && i.status !== 'pending');
+    for (const a of Array.isArray(list) ? list : []) {
+      if (!a || typeof a !== 'object') { dropped++; continue; }
+      const t = a.type; let ok = false; const x = { type: t };
+      if (t === 'move_item') { ok = !!item(a.item) && assign.includes(a.category) && item(a.item).cat !== a.category; Object.assign(x, { item: a.item, category: a.category }); }
+      else if (t === 'rename_item') { ok = !!item(a.item) && typeof a.title === 'string' && !!a.title.trim(); Object.assign(x, { item: a.item, title: String(a.title || '').trim().slice(0, 90) }); }
+      else if (t === 'mark_task') { ok = state.tasks.some((k) => k.id === a.task); Object.assign(x, { task: a.task, done: a.done !== false && a.done !== 'false' }); }
+      else if (t === 'add_task') { ok = typeof a.text === 'string' && !!a.text.trim(); Object.assign(x, { text: String(a.text || '').trim().slice(0, 300), category: subs.includes(a.category) ? a.category : (subs[0] || 'todo') }); }
+      else if (t === 'organize_again') { ok = state.notes.some((n) => n.id === a.note); Object.assign(x, { note: a.note, instruction: String(a.instruction || '').trim().slice(0, 500) }); }
+      else if (t === 'show_note') { ok = state.notes.some((n) => n.id === a.note); x.note = a.note; }
+      if (ok && !out.some((o) => JSON.stringify(o) === JSON.stringify(x))) out.push(x); else dropped++;
+    }
+    return { actions: out.slice(0, 8), dropped };
+  }
+  function checkRemember(list, memory) {
+    const have = new Set((memory || []).map((m) => String(m.text || m).toLowerCase().trim()));
+    return [...new Set((Array.isArray(list) ? list : []).map((r) => String(r || '').trim()).filter((r) => r.length >= 3 && r.length <= 300 && !have.has(r.toLowerCase())))].slice(0, 5);
+  }
 
   /* ---------- report for Claude ---------- */
   const NOT_NAMES = new Set(('I Im Ive Id Ill The A An And But Or So If Then When While This That These Those It Its My Me We Our You Your He She They His Her Their Ok Okay Yes No Not Ex Sol Note Notes Monday Tuesday Wednesday Thursday Friday Saturday Sunday January February March April May June July August September October November December Jan Feb Mar Apr Jun Jul Aug Sep Sept Oct Nov Dec English Hindi Odia India Indian Google Keep Notepad Windows Chrome Edge Ollama ChatGPT Claude AI PowerPoint Excel Word WordPress Twitter Linkedin LinkedIn Insta Instagram Youtube YouTube Facebook WhatsApp Mind Desk Haha Also Just Maybe May Like Make Think Today Tomorrow Now Later Done End Result').split(' '));
@@ -587,7 +730,8 @@ Answer only with JSON: {"text":""}`,
       L.push('', '## Categories');
       for (const c of assignableCats(cats)) L.push(`- ${c.id}: ${catPath(cats, c.id)}${c.desc ? ' — ' + c.desc : ''}`);
       L.push('', '## My words'); (state.words || []).forEach((w) => L.push(`- ${w.term} = ${w.meaning || '(keep as is)'}`));
-      L.push('', '## My rules'); (state.rules || []).filter(Boolean).forEach((r) => L.push('- ' + r)); if (!(state.rules || []).filter(Boolean).length) L.push('(none)');
+      L.push('', '## Memory'); (state.memory || []).forEach((m) => L.push('- ' + m.text)); if (!(state.memory || []).length) L.push('(none)');
+      if ((state.rules || []).filter(Boolean).length) { L.push('', '## My rules'); state.rules.filter(Boolean).forEach((r) => L.push('- ' + r)); }
     }
     if (o.prompts) {
       const edited = Object.entries(state.prompts || {}).filter(([, v]) => v);
@@ -677,6 +821,7 @@ Answer only with JSON: {"text":""}`,
     buildOrganizePrompt, bulkSplitPrompt, bulkOrganizePrompt, bulkSurveyPrompt, diff, changeRatio, countTerm, checkOrganize,
     checkSurvey, fmtDate, safeName, categoryMarkdown, allMarkdown, visibleTasks, validBackup, backupProblem, itemsIn, linkedTasks,
     editDistance, splitOriginal, taskSupport, taskDone, charChange, wordMatch, EDIT_RULES, buildFixPrompt, buildReport, nameCandidates, hideNames,
+    buildChatContext, buildChatPrompt, checkChatActions, checkRemember,
   };
 })();
 if (typeof window !== 'undefined') window.MDCore = MDCore;

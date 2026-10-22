@@ -80,7 +80,7 @@ async function test(name, fn) {
     await p.evaluate(async () => { const s = JSON.parse(JSON.stringify(MD.state)); s.schema = 1; s.items[0].tags = ['job']; s.rev = 500; await MD.store.set('state', s); });
     await p.close();
     const p2 = await page({ context: ctx, raw: true });
-    assert.deepStrictEqual(await p2.evaluate(() => [MD.state.schema, MD.state.items[0].tags]), [2, []]);
+    assert.deepStrictEqual(await p2.evaluate(() => [MD.state.schema >= 2, MD.state.items[0].tags]), [true, []]); // schema is 3 since 1.1.0
     await p2.evaluate(() => { MD.state.items[0].tags = ['job']; MD.save(); }); await sleep(400);
     await p2.close();
     const p3 = await page({ context: ctx, raw: true });

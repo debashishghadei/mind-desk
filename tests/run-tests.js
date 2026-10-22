@@ -147,10 +147,10 @@ async function test(name, fn) {
     await p.click('[data-act=useGuess][data-k="1"]');
     await p.click('[data-act=submitSurvey]');
     await waitRunEnd(p);
-    const st = await p.evaluate(() => ({ items: MD.state.items, words: MD.state.words, rules: MD.state.rules, tasks: MD.state.tasks, view: MD.UI.view }));
+    const st = await p.evaluate(() => ({ items: MD.state.items, words: MD.state.words, rules: MD.state.memory.map((m) => m.text), tasks: MD.state.tasks, view: MD.UI.view }));
     assert.strictEqual(st.items.length, 6); assert.ok(st.items.every((i) => i.status === 'review'));
     assert.ok(st.words.some((w) => w.term === 'IGS' && /inner guidance/.test(w.meaning)));
-    assert.ok(st.rules.some((r) => /Ravi/.test(r) && /client/.test(r)));
+    assert.ok(st.rules.some((r) => /Ravi/.test(r) && /client/.test(r)), 'intent answers go to Memory (1.1.0)');
     assert.strictEqual(st.view, 'review');
     const L = await log();
     const org = L.filter((x) => /You organize one note/.test(x.system));
@@ -377,8 +377,8 @@ async function test(name, fn) {
     assert.strictEqual(await p.evaluate(() => MD.state.items[0].cat), 'unsorted');
     await p.click('[data-act=nav][data-v=words]');
     await p.click('[data-act=addWord]'); await p.fill('[data-wf=term] >> nth=-1', 'HL2'); await p.fill('[data-wf=meaning] >> nth=-1', 'HappyLife247 site'); await p.press('[data-wf=meaning] >> nth=-1', 'Tab');
-    await p.click('[data-act=addRule]'); await p.fill('[data-rule] >> nth=-1', 'plugin notes go to My business'); await p.press('[data-rule] >> nth=-1', 'Tab');
-    const st = await p.evaluate(() => ({ w: MD.state.words, r: MD.state.rules }));
+    await p.click('[data-act=addMem]'); await p.fill('[data-mem] >> nth=-1', 'plugin notes go to My business'); await p.press('[data-mem] >> nth=-1', 'Tab'); // 1.1.0: rules live in Memory
+    const st = await p.evaluate(() => ({ w: MD.state.words, r: MD.state.memory.map((m) => m.text) }));
     assert.ok(st.w.some((w) => w.term === 'HL2' && w.meaning === 'HappyLife247 site')); assert.deepStrictEqual(st.r, ['plugin notes go to My business']);
     await p.context().close();
   });

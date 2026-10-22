@@ -1,9 +1,9 @@
 # Handoff — read this first
 
 **Project:** Mind Desk, a local AI note organizer for the owner (Debashish Ghadei). Plan, decisions and reasons: `DECISIONS.md`.
-**Current version:** 1.0.4 (22 Oct 2026): live progress + thinking limit, one place rule, Organize this note, menu toggle, typos-only/clean-up, Fix my typing, Report for Claude. Delivered as `mind-desk-1.0.4.zip` + `mind-desk-1.0.4-TEST-REPORT.md` + `mind-desk-1.0.4-tests.zip`.
+**Current version:** 1.1.0 (22 Oct 2026): Chat + Memory (D37–D40) on top of 1.0.4 (live progress, one place rule, Organize this note, Fix my typing, Report for Claude). Delivered as `mind-desk-1.1.0.zip` + `mind-desk-1.1.0-TEST-REPORT.md` + `mind-desk-1.1.0-tests.zip`.
 **First real run (22 Oct 2026, 4 notes, Fast):** "did a good job, saved hours"; some typos missed and text partly reworded (owner: fine); Careful "seemed stuck" (likely long thinking without visible progress → D32); notes appeared in several folders (AI tags + linked tasks → D33). Test note: 12.9 s first (model load), 2.3 s after.
-**Next:** owner tests 1.0.4 and sends a "Report for Claude" for problems; then 1.1.0 Chat + Memory (D31).
+**Next:** owner tests 1.1.0 (chat with the real qwen3.5:9b: does it follow the JSON format, suggest correct ids, answer usefully?) and sends a "Report for Claude" for problems. Owner asked to build everything first, then test.
 
 **Reviews:** ChatGPT review of 1.0.0: 17 testable points (R1–R15, R17, R18) all confirmed by tests failing on 1.0.0 and fixed in 1.0.1; R16 (`OLLAMA_ORIGINS=*`) is a trade-off, see D20. Review tests: `tests/review-tests.js`.
 ChatGPT review of 1.0.1: 17 testable points (S1–S17) all confirmed by tests failing on 1.0.1 and fixed in 1.0.2; S18 (real-model trial) still open. Tests: `tests/review2-tests.js`.
@@ -18,11 +18,11 @@ ChatGPT review of 1.0.1: 17 testable points (S1–S17) all confirmed by tests fa
 - `src/core.js` pure logic (blocks, prompts, JSON parsing, guardrails, diff, Markdown). Exposed as `window.MDCore`.
 - `src/app.js` interface, AI calls, run loop, storage, folder sync. Debug handle `window.MD`.
 - `src/style.css`, `src/index.html`; `node bin/build.js` → `mind-desk.html` (committed). `--zip` → `dist/`.
-- Data: one IndexedDB record `state` (with a `rev` number checked on every save) (notes, items, tasks, categories, words, rules, prompts, settings, survey) + `folder` (directory handle) + `recovery` (unsaved copy from a window that lost control). State also has `runLog` (not in backups) and `schema` 2.
+- Data: one IndexedDB record `state` (with a `rev` number checked on every save) (notes, items, tasks, categories, words, rules, prompts, settings, survey) + `folder` (directory handle) + `recovery` (unsaved copy from a window that lost control). State also has `runLog` (not in backups), `memory`, `chats` and `schema` 3.
 - Item status: `pending` (split, waiting for AI) → `review` → `approved`. Note status `new` → `split`.
 
 ## Tests
-`PW=<playwright path> node tests/run-tests.js [mind-desk.html]` — 24 browser tests from a `file://` URL with `tests/fake-ollama.js`. `REAL_OLLAMA=…` adds a real-Ollama connection check. `node tests/review-tests.js [html]` — 18 tests for review 1; `node tests/review2-tests.js [html]` — 17 tests for review 2 (`ONLY=S3` runs one); `node tests/v103-tests.js [html]` — 11 tests for Fast/Careful and thinking; `node tests/v104-tests.js [html]` — 10 tests for 1.0.4. The stand-in AI streams NDJSON when asked (`LONGTHINK` in a note = endless thinking). Results in `tests/last-*.json`.
+`PW=<playwright path> node tests/run-tests.js [mind-desk.html]` — 24 browser tests from a `file://` URL with `tests/fake-ollama.js`. `REAL_OLLAMA=…` adds a real-Ollama connection check. `node tests/review-tests.js [html]` — 18 tests for review 1; `node tests/review2-tests.js [html]` — 17 tests for review 2 (`ONLY=S3` runs one); `node tests/v103-tests.js [html]` — 11 tests for Fast/Careful and thinking; `node tests/v104-tests.js [html]` — 10 tests for 1.0.4; `node tests/v110-tests.js [html]` — 12 tests for Chat + Memory. The stand-in AI streams NDJSON when asked (`LONGTHINK` in a note = endless thinking). Results in `tests/last-*.json`.
 
 ## Not tested yet
 - A real model's quality on the owner's notes (no model download possible in the build sandbox). First real run will need prompt tuning.

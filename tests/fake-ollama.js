@@ -88,6 +88,20 @@ function start(port, opts = {}) {
           const terms = [...new Set([...user.matchAll(/\b[A-Z][A-Z0-9]{1,5}\b/g)].map((m) => m[0]))].filter((t) => !['CEO', 'SEO', 'AI'].includes(t) && !known.includes(t.toLowerCase()));
           out = { questions: terms.map((t) => ({ kind: 'word', term: t, guess: 'my guess for ' + t })) };
           if (/Ravi/.test(user)) out.questions.push({ kind: 'intent', quote: 'call Ravi about it', question: 'Is Ravi a client or a friend?', guess: 'client' });
+        } else if (/You are the assistant inside Mind Desk/.test(sys)) {
+          const said = user.split('Person: ').pop();
+          const items = [...sys.matchAll(/ITEM \[([\w-]+)\]/g)].map((m) => m[1]);
+          const tasks = [...sys.matchAll(/TASK \[([\w-]+)\]/g)].map((m) => m[1]);
+          const named = [...sys.matchAll(/\nNOTE \[([\w-]+)\]/g)].map((m) => m[1]);
+          const actions = []; const remember = [];
+          if (/remember/i.test(said)) remember.push(said.replace(/^.*?remember:?\s*/i, '').trim());
+          if (/move/i.test(said) && items[0]) actions.push({ type: 'move_item', item: items[0], category: /job/i.test(said) ? 'job' : 'personal' }, { type: 'move_item', item: 'nope-id', category: 'job' });
+          if (/done/i.test(said) && tasks[0]) actions.push({ type: 'mark_task', task: tasks[0], done: true });
+          if (/add task/i.test(said)) actions.push({ type: 'add_task', text: said.replace(/^.*add task:?\s*/i, ''), category: 'todo-chores' });
+          if (/again/i.test(said) && named[0]) actions.push({ type: 'organize_again', note: named[0], instruction: 'keep Hinglish words as they are' });
+          if (/show/i.test(said) && named[0]) actions.push({ type: 'show_note', note: named[0] });
+          if (/rename/i.test(said) && items[0]) actions.push({ type: 'rename_item', item: items[0], title: 'Renamed by chat' });
+          out = { reply: `I found ${items.length} item(s) and ${tasks.length} task(s).${items[0] ? ' First: [[item:' + items[0] + ']]' : ''}${named[0] ? ' Note: [[note:' + named[0] + ']]' : ''}`, actions, remember };
         } else if (/You fix the typing/.test(sys)) {
           const t = (user.match(/<<<\n([\s\S]*?)\n>>>/) || [])[1] || '';
           out = { text: /clearer/.test(sys) ? 'CLEANED: ' + fixText(t) : fixText(t) };

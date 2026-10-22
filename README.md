@@ -36,10 +36,14 @@ With `OLLAMA_ORIGINS=*`, websites you visit could also use your local AI (send i
 
 1. **Inbox → Add files** (or drag `.txt` files into the window, or **Paste a note**). The date is added automatically.
 2. Choose **⚡ Fast** (quick) or **🧠 Careful** (the AI thinks first: slower, better at understanding what you meant), then **✨ Organize all** — or **✨ Organize this note** on one note in the Inbox. The top bar shows the seconds; in Careful mode a small panel shows the AI thinking live. Afterwards, **Show AI's thinking** reveals how it decided.
-3. **Questions for you.** The AI asks about words and notes it does not understand. Your answers go into **My words & rules** and are used every time from then on.
+3. **Questions for you.** The AI asks about words and notes it does not understand. Your answers go into **Memory & words** and are used every time from then on.
 4. **Review.** Red = removed, green = added by the AI. Approve, edit, change the category, join with the previous item, or keep your original text. Put `---` on its own line while editing to split an item in two.
 5. **To-do** and the **categories** show only approved items. Each note lives in one category; tasks live only in To-do. Tick tasks when done.
 6. To change a note later: **Edit** it in its category. **✨ Fix my typing** lets the AI clean what you just typed (you see the changes first).
+
+**💬 Chat:** ask about your notes ("what are my job to-dos?", "show me note 4"), tell it what to change ("move the gym plan to Personal goals"), or teach it ("remember: BR is my client"). Changes only happen when you click **Apply**; things to remember only when you click **Remember**. Your chats are saved.
+
+**🧠 Memory & words:** everything Mind Desk knows about you and your shortcodes. It is used in every AI request, with any model. When you move an item to another category in Review, Mind Desk offers to remember that.
 
 **Something looks wrong?** Click **📋 Report for Claude** on the note (or in Settings), check the text, and paste it into your chat with Claude. You can hide names first.
 
@@ -64,5 +68,5 @@ Replace `mind-desk.html` (and the `.bat`) with the new files. Your data stays.
 ## For developers
 
 - Source: `src/` (`core.js` logic, `app.js` interface, `style.css`, `index.html`). Build the single file with `node bin/build.js` (`--zip` also makes `dist/mind-desk-<version>.zip`).
-- Tests: `tests/run-tests.js` runs Chromium (Playwright) against `mind-desk.html` opened from a `file://` URL, with a stand-in Ollama (`tests/fake-ollama.js`). `REAL_OLLAMA=http://127.0.0.1:11434` adds a check against a real Ollama. `tests/review-tests.js` and `tests/review2-tests.js` cover the two review rounds; `tests/v103-tests.js` covers Fast/Careful; `tests/v104-tests.js` covers 1.0.4.
+- Tests: `tests/run-tests.js` runs Chromium (Playwright) against `mind-desk.html` opened from a `file://` URL, with a stand-in Ollama (`tests/fake-ollama.js`). `REAL_OLLAMA=http://127.0.0.1:11434` adds a check against a real Ollama. `tests/review-tests.js` and `tests/review2-tests.js` cover the two review rounds; `tests/v103-tests.js` covers Fast/Careful; `tests/v104-tests.js` covers 1.0.4; `tests/v110-tests.js` covers Chat + Memory.
 - Shared notes for the AIs working on this repo: `HANDOFF.md`, `DECISIONS.md`.
