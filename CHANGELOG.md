@@ -2,6 +2,20 @@
 
 All notable changes to Mind Desk. Versions follow semantic versioning.
 
+## 1.0.4 — 2026-10-22
+
+Changes from the owner's first real run.
+
+- **Live progress:** answers from Ollama are streamed. While the AI works, the top bar shows seconds and what it is doing (waiting / thinking / writing), and in Careful mode a small panel shows its thinking as it is written (can be hidden). Careful no longer looks stuck.
+- **Thinking time limit** (Settings, default 120 s): if the AI is still thinking after that, it is stopped and the item is answered in Fast mode, with a note on the item.
+- **One place rule:** each note lives in one category. The AI no longer adds "also show in" tags; tags it added before 1.0.4 are removed once (your own later tags stay). Tasks are listed only in To-do; category pages show a link like "2 open tasks for this area are in To-do". Category Markdown files no longer repeat tasks.
+- **✨ Organize this note** button for each new note in the Inbox. "Organize again" also only redoes that note.
+- **☰ Hide/show the menu** (remembered).
+- **How much may the AI change your text?** Settings: "Fix typos only" (default) or "Clean up wording". Clean-up may reword, but numbers, names, "not" and content are still checked.
+- **✨ Fix my typing** in the editor: the AI fixes the text in the box (or only the selected part); you see the changes and choose "Use the fixed text" or "Keep mine".
+- **📋 Report for Claude:** for one note (Inbox) or all notes / items waiting for review (Settings). Text with the original, how the AI split and cleaned it, categories, tasks, warnings, thinking and timings of the last AI requests. Preview before copying, optional name hiding (Person 1, Person 2 …), Copy, Download, or save into the Mind Desk folder (Reports). Never includes the API key.
+- Each AI request's time is recorded (shown in reports); not included in backups.
+
 ## 1.0.3 — 2026-10-22
 
 - **⚡ Fast / 🧠 Careful** choice next to ✨ Organize all. Fast: quick answers, no thinking. Careful: the AI thinks first (slower, better at understanding intent). Mind Desk remembers the last choice.

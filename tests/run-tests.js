@@ -183,14 +183,14 @@ async function test(name, fn) {
     await p.waitForSelector('.todo >> text=pay electricity bill');
   });
 
-  await test('review: job tasks also show in the Job category; change category from the list', async () => {
+  await test('review: Job page links to its open tasks in To-do (one place rule, 1.0.4); change category from the list', async () => {
     const p = flowCtx;
     await p.click('[data-act=nav][data-v=review]');
     const id = await p.evaluate(() => MD.state.items.find((i) => /PowerPoint/.test(i.original)).id);
     await p.selectOption(`select[data-id="${id}"]`, 'job');
     await p.click(`[data-act=approve][data-id="${id}"]`);
     await p.click('[data-act=nav][data-v="cat:job"]');
-    await p.waitForSelector('h2 >> text=Open tasks'); assert.ok(await p.isVisible('.todo >> text=Make PowerPoint for owner'));
+    await p.waitForSelector('text=1 open task for this area is in To-do'); assert.strictEqual(await p.locator('#content .todo').count(), 0, 'tasks are listed only in To-do');
     const it = await p.evaluate((id) => MD.state.items.find((i) => i.id === id), id);
     assert.strictEqual(it.cat, 'job'); assert.ok(!it.flags.includes('unsorted'));
   });

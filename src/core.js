@@ -50,11 +50,10 @@ Answer only with JSON: {"questions":[{"kind":"word","term":"","guess":""},{"kind
     organize:
 `You organize one note that a person wrote quickly for themselves.
 Return:
-1. "text": the SAME note with ONLY spelling mistakes and typos fixed (examples: "thoguth" -> "thought", "mov eon" -> "move on", "teh" -> "the"). Keep the person's own words, short style, slang, "haha", grammar style, line breaks, list markers and "//" lines. Do NOT rewrite, polish, summarize, translate, add or remove anything. Keep these words exactly as written: {{protected}}
+1. "text": {{editRule}} Keep these words exactly as written: {{protected}}
 2. "title": a short title in plain English, at most 8 words.
 3. "category": the id of the ONE best category.
-4. "tags": ids of other categories this note also clearly relates to (often empty).
-5. "tasks": only real actions the person intends to do (chores, buying, work tasks). Write each as a short clear task. "done" is true if it is marked done. "category" is the best to-do id. Reflections, lessons, wishes and goals are NOT tasks. Never make a task from something the person says NOT to do. "done" is true ONLY if the note clearly says it is done. Empty list if there are none.
+4. "tasks": only real actions the person intends to do (chores, buying, work tasks). Write each as a short clear task. "done" is true if it is marked done. "category" is the best to-do id. Reflections, lessons, wishes and goals are NOT tasks. Never make a task from something the person says NOT to do. "done" is true ONLY if the note clearly says it is done. Empty list if there are none.
 Categories (id: name - meaning):
 {{categories}}
 To-do ids for tasks:
@@ -63,7 +62,19 @@ What the person's words mean:
 {{words}}
 The person's rules:
 {{rules}}
-Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","done":false,"category":""}],"text":""}`,
+Answer only with JSON: {"title":"","category":"","tasks":[{"text":"","done":false,"category":""}],"text":""}`,
+    fix:
+`You fix the typing of a short text a person just wrote in their notes app.
+{{editRule}}
+Keep these words exactly as written: {{protected}}
+What the person's words mean:
+{{words}}
+Answer only with JSON: {"text":""}`,
+  };
+  /** how much the AI may change the person's text (Settings → writing) */
+  const EDIT_RULES = {
+    typos: 'the SAME text with ONLY spelling mistakes and typos fixed (examples: "thoguth" -> "thought", "mov eon" -> "move on", "teh" -> "the"). Keep the person\'s own words, short style, slang, "haha", grammar style, line breaks, list markers and "//" lines. Do NOT rewrite, polish, summarize, translate, add or remove anything.',
+    clean: 'the SAME text with typos fixed and sentences made a little clearer and easier to read later. Keep the meaning, every point, every name, number and date, every "not"/"don\'t", the person\'s own voice, "haha", line breaks, list markers and "//" lines. Do NOT summarize, add new ideas, remove points, or change what the person decided.',
   };
 
   const SCHEMAS = {
@@ -73,6 +84,7 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
       properties: { questions: { type: 'array', items: { type: 'object', properties: { kind: { type: 'string', enum: ['word', 'intent'] }, term: { type: 'string' }, quote: { type: 'string' }, question: { type: 'string' }, guess: { type: 'string' } }, required: ['kind'] } } },
       required: ['questions'],
     },
+    fix: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
     organize: {
       type: 'object',
       properties: {
@@ -80,7 +92,7 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
         tasks: { type: 'array', items: { type: 'object', properties: { text: { type: 'string' }, done: { type: 'boolean' }, category: { type: 'string' } }, required: ['text', 'done', 'category'] } },
         text: { type: 'string' },
       },
-      required: ['title', 'category', 'tags', 'tasks', 'text'],
+      required: ['title', 'category', 'tasks', 'text'],
     },
   };
 
@@ -199,10 +211,15 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
   function buildSurveyPrompt(tpl, text, ctx) {
     return { system: fill(tpl, { max: String(ctx.max || 8), categories: assignableCats(ctx.cats).map((c) => catPath(ctx.cats, c.id)).join('; '), words: wordLines(ctx.words) }), user: 'Notes:\n<<<\n' + text + '\n>>>' };
   }
+  const editRule = (ctx) => EDIT_RULES[ctx.editStyle] || EDIT_RULES.typos;
+  function buildFixPrompt(tpl, text, ctx) {
+    const prot = protectedTerms(text, ctx.words);
+    return { system: fill(tpl, { editRule: 'Return ' + editRule(ctx).replace(/^the SAME/, 'the same'), protected: prot.length ? prot.join(', ') : '(none)', words: wordLines(ctx.words) }), user: 'Text:\n<<<\n' + text + '\n>>>' };
+  }
   function buildOrganizePrompt(tpl, text, ctx) {
     const prot = protectedTerms(text, ctx.words);
     return {
-      system: fill(tpl, { protected: prot.length ? prot.join(', ') : '(none)', categories: catLines(ctx.cats), todoCategories: todoLines(ctx.cats), words: wordLines(ctx.words), rules: ruleLines(ctx.rules) }),
+      system: fill(tpl, { editRule: editRule(ctx), protected: prot.length ? prot.join(', ') : '(none)', categories: catLines(ctx.cats), todoCategories: todoLines(ctx.cats), words: wordLines(ctx.words), rules: ruleLines(ctx.rules) }),
       user: 'Note:\n<<<\n' + text + '\n>>>',
     };
   }
@@ -216,7 +233,7 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
   function bulkOrganizePrompt(tpl, items, ctx) {
     const all = items.map((i) => i.text).join('\n');
     const p = buildOrganizePrompt(tpl, all, ctx);
-    let user = 'There are several notes. Do the job for EACH note separately and keep its id.\nAnswer only with JSON: {"results":[{"id":"note id","title":"","category":"","tags":[],"tasks":[],"text":""}]}\n\n';
+    let user = 'There are several notes. Do the job for EACH note separately and keep its id.\nAnswer only with JSON: {"results":[{"id":"note id","title":"","category":"","tasks":[],"text":""}]}\n\n';
     for (const it of items) user += `=== NOTE ${it.id} ===\n<<<\n${it.text}\n>>>\n\n`;
     return p.system + '\n\n' + user;
   }
@@ -373,7 +390,7 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
       category = byName ? byName.id : 'unsorted';
       if (!byName) flags.push('unsorted');
     }
-    const tags = [...new Set((Array.isArray(r.tags) ? r.tags : []).map(String).filter((t) => cats.some((c) => c.id === t) && !isTodoCat(cats, t) && t !== category && t !== 'unsorted'))];
+    const tags = ctx.noTags ? [] : [...new Set((Array.isArray(r.tags) ? r.tags : []).map(String).filter((t) => cats.some((c) => c.id === t) && !isTodoCat(cats, t) && t !== category && t !== 'unsorted'))];
     const subs = todoSubs(cats).map((c) => c.id);
     const area = (id) => { const c = todoSubs(cats).find((s) => s.area && subtreeIds(cats, s.area).includes(id)); return c ? c.id : null; };
     let taskWarn = false;
@@ -394,9 +411,10 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     const wo = words(original).length, wt = words(text).length;
     const norm = (t) => quotes(t).toLowerCase().replace(/[ \t]+/g, ' ').trim();
     const a = norm(original), b = norm(text);
-    if ((wo >= 6 && wt < wo * 0.8) || b.length < a.length * 0.7) flags.push('shortened');
+    const clean = ctx.editStyle === 'clean'; // clean-up mode may reword, but must not drop content or change facts
+    if (clean ? (wo >= 6 && wt < wo * 0.6) || b.length < a.length * 0.5 : (wo >= 6 && wt < wo * 0.8) || b.length < a.length * 0.7) flags.push('shortened');
     const ch = charChange(a, b);
-    if (ch.dist > 4 && ch.dist / ch.len > 0.3) flags.push('bigchange');
+    if (!clean && ch.dist > 4 && ch.dist / ch.len > 0.3) flags.push('bigchange');
     if (numbersOf(quotes(original)) !== numbersOf(quotes(text))) flags.push('numbers');
     if (negationChanged(original, text)) flags.push('negation');
     const lost = protectedTerms(original, ctx.words).filter((t) => countTerm(text, t) < countTerm(original, t));
@@ -447,8 +465,7 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     const items = itemsIn(state, catId).sort((a, b) => a.createdAt - b.createdAt);
     const isTodo = catId === 'todo' || isTodoCat(cats, catId);
     let md = `# ${catPath(cats, catId)}\n\n`;
-    const linked = isTodo ? [] : linkedTasks(state, catId);
-    if (linked.length) md += '## Tasks\n\n' + linked.map((t) => `- [${t.done ? 'x' : ' '}] ${t.text}\n`).join('') + '\n';
+    // one place rule (1.0.4): tasks are listed only in To-do
     if (isTodo) {
       const tasks = visibleTasks(state).filter((t) => ids.includes(t.cat));
       for (const sub of [catId, ...ids.slice(1)]) {
@@ -536,6 +553,70 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
   }
   function validBackup(o) { return !backupProblem(o); }
 
+  /* ---------- report for Claude ---------- */
+  const NOT_NAMES = new Set(('I Im Ive Id Ill The A An And But Or So If Then When While This That These Those It Its My Me We Our You Your He She They His Her Their Ok Okay Yes No Not Ex Sol Note Notes Monday Tuesday Wednesday Thursday Friday Saturday Sunday January February March April May June July August September October November December Jan Feb Mar Apr Jun Jul Aug Sep Sept Oct Nov Dec English Hindi Odia India Indian Google Keep Notepad Windows Chrome Edge Ollama ChatGPT Claude AI PowerPoint Excel Word WordPress Twitter Linkedin LinkedIn Insta Instagram Youtube YouTube Facebook WhatsApp Mind Desk Haha Also Just Maybe May Like Make Think Today Tomorrow Now Later Done End Result').split(' '));
+  /** words that look like names of people (capitalised inside a sentence); the owner can edit the list before hiding */
+  function nameCandidates(text, words) {
+    const known = new Set((words || []).map((w) => String(w.term).toLowerCase()));
+    const out = new Map();
+    for (const m of String(text).matchAll(/(?<=[a-z,;:]\s+|\b(?:to|with|from|by|ask|call|tell|meet|pay)\s+)([A-Z][a-z]{2,})\b/g)) {
+      const w = m[1]; if (NOT_NAMES.has(w) || known.has(w.toLowerCase())) continue;
+      out.set(w, (out.get(w) || 0) + 1);
+    }
+    return [...out.keys()];
+  }
+  function hideNames(text, names) {
+    let t = String(text);
+    names.forEach((n, k) => { if (n) t = t.replace(new RegExp('\\b' + reEsc(n) + '\\b', 'gi'), 'Person ' + (k + 1)); });
+    return t;
+  }
+  /**
+   * Plain-text report of what Mind Desk shows, for pasting into a chat with Claude.
+   * opts: {noteIds|null, thinking, settings, prompts, runLog, hide:[names], version, defaults:{prompts}}
+   */
+  function buildReport(state, opts) {
+    const o = Object.assign({ thinking: true, settings: true, prompts: true, runLog: true, hide: [] }, opts || {});
+    const cats = state.categories; const s = state.settings || {};
+    const notes = state.notes.filter((n) => !o.noteIds || o.noteIds.includes(n.id)).sort((a, b) => a.addedAt - b.addedAt);
+    const L = [];
+    const dt = (ts) => new Date(ts).toISOString().replace('T', ' ').slice(0, 16);
+    L.push(`MIND DESK REPORT · version ${o.version || '?'} · ${dt(Date.now())} UTC`);
+    L.push(`AI: ${s.provider === 'ollama' ? 'Ollama, model ' + s.model : s.provider === 'openai' ? 'OpenAI-style API, model ' + s.oaModel : 'copy & paste'} · default mode ${s.mode || 'fast'} · writing: ${s.editStyle === 'clean' ? 'clean up wording' : 'fix typos only'}`);
+    L.push(`Notes in this report: ${notes.length} of ${state.notes.length}`);
+    if (o.settings) {
+      L.push('', '## Categories');
+      for (const c of assignableCats(cats)) L.push(`- ${c.id}: ${catPath(cats, c.id)}${c.desc ? ' — ' + c.desc : ''}`);
+      L.push('', '## My words'); (state.words || []).forEach((w) => L.push(`- ${w.term} = ${w.meaning || '(keep as is)'}`));
+      L.push('', '## My rules'); (state.rules || []).filter(Boolean).forEach((r) => L.push('- ' + r)); if (!(state.rules || []).filter(Boolean).length) L.push('(none)');
+    }
+    if (o.prompts) {
+      const edited = Object.entries(state.prompts || {}).filter(([, v]) => v);
+      L.push('', '## AI instructions'); if (!edited.length) L.push('All default (not edited).');
+      for (const [k, v] of edited) L.push(`### ${k} (edited)`, v);
+    }
+    for (const n of notes) {
+      const its = state.items.filter((i) => i.noteId === n.id).sort((a, b) => a.order - b.order);
+      L.push('', `=== NOTE "${n.name}" · added ${dt(n.addedAt)} · ${n.text.length} chars · ${n.status === 'new' ? 'not organized yet' : its.length + ' item(s)'}${n.splitMs ? ' · split took ' + (n.splitMs / 1000).toFixed(1) + ' s' : ''} ===`);
+      L.push('--- ORIGINAL NOTE ---', n.text);
+      if (o.thinking && n.splitThinking) L.push('--- AI THINKING WHILE SPLITTING ---', n.splitThinking);
+      its.forEach((it, k) => {
+        const tasks = (state.tasks || []).filter((t) => t.itemId === it.id);
+        L.push('', `--- ITEM ${k + 1}/${its.length} · ${it.status} · ${catPath(cats, it.cat)}${it.tags && it.tags.length ? ' (also: ' + it.tags.map((t) => catPath(cats, t)).join(', ') + ')' : ''} · ${it.mode || 'fast'}${it.ms ? ' · ' + (it.ms / 1000).toFixed(1) + ' s' : ''}${it.flags && it.flags.length ? ' · warnings: ' + it.flags.join(', ') : ''}${it.surveyFailed ? ' · questions step failed' : ''} ---`);
+        L.push('Title: ' + (it.title || ''));
+        L.push('Original part:', it.original);
+        if (it.text !== it.original) L.push('Cleaned:', it.text); else L.push('Cleaned: (same as original)');
+        if (tasks.length) { L.push('Tasks:'); tasks.forEach((t) => L.push(`- [${t.done ? 'x' : ' '}] ${t.text} (${catPath(cats, t.cat)})`)); }
+        if (it.error) L.push('AI error: ' + it.error);
+        if (o.thinking && it.thinking) L.push('AI thinking:', it.thinking);
+      });
+    }
+    if (o.runLog && Array.isArray(state.runLog) && state.runLog.length) {
+      L.push('', '## Last AI requests (newest last)');
+      for (const r of state.runLog.slice(-60)) L.push(`- ${dt(r.at)} ${r.step}${r.note ? ' "' + r.note + '"' : ''} · ${r.mode} · ${(r.ms / 1000).toFixed(1)} s · ${r.ok ? 'ok' : 'FAILED: ' + r.err}${r.cut ? ' · thinking stopped (too long)' : ''}${r.thinkChars ? ' · thinking ' + r.thinkChars + ' chars' : ''}`);
+    }
+    return hideNames(L.join('\n'), o.hide || []);
+  }
+
   /**
    * After "---" splits the edited text, find the matching pieces of the original (typo) text.
    * Words are lined up allowing typos ("wnat" ~ "want", "mov eon" ~ "move on"). For very long texts the cut is
@@ -595,7 +676,7 @@ Answer only with JSON: {"title":"","category":"","tags":[],"tasks":[{"text":"","
     makeBlocks, groupsFromStarts, blockWindows, parseJSON, fill, protectedTerms, buildSplitPrompt, buildSurveyPrompt,
     buildOrganizePrompt, bulkSplitPrompt, bulkOrganizePrompt, bulkSurveyPrompt, diff, changeRatio, countTerm, checkOrganize,
     checkSurvey, fmtDate, safeName, categoryMarkdown, allMarkdown, visibleTasks, validBackup, backupProblem, itemsIn, linkedTasks,
-    editDistance, splitOriginal, taskSupport, taskDone, charChange, wordMatch,
+    editDistance, splitOriginal, taskSupport, taskDone, charChange, wordMatch, EDIT_RULES, buildFixPrompt, buildReport, nameCandidates, hideNames,
   };
 })();
 if (typeof window !== 'undefined') window.MDCore = MDCore;

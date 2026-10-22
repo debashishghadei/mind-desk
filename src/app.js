@@ -60,6 +60,7 @@
     return {
       provider: 'ollama', ollamaUrl: 'http://localhost:11434', model: 'qwen3.5:9b', numCtx: 8192, temperature: 0.2, timeoutSec: 300,
       mode: 'fast', thinkSplit: true, thinkSurvey: true, thinkOrganize: true, // Careful mode: which steps let the AI think first
+      thinkLimitSec: 120, editStyle: 'typos', sidebar: 'show',
       oaUrl: 'http://localhost:3001/api/v1/openai', oaKey: '', oaModel: '', manualBatch: 20, survey: true, surveyMax: 8, theme: 'auto',
     };
   }
@@ -67,7 +68,7 @@
     return {
       app: 'mind-desk', schema: 1, notes: [], items: [], tasks: [], categories: C.defaultCategories(),
       words: [{ id: C.uid('w'), term: 'Madhutech', meaning: 'Madhu Infotech, my job (not my own website)' }],
-      rules: [], prompts: { split: null, survey: null, organize: null }, settings: defaultSettings(), survey: null, folderFiles: [], folderOriginals: [],
+      rules: [], prompts: { split: null, survey: null, organize: null, fix: null }, settings: defaultSettings(), survey: null, folderFiles: [], folderOriginals: [], runLog: [],
     };
   }
   function migrate(s) {
@@ -76,11 +77,14 @@
     out.settings = Object.assign(defaultSettings(), (s && s.settings) || {});
     if ('think' in out.settings) { if (out.settings.think === true && !(s.settings && s.settings.mode)) out.settings.mode = 'careful'; delete out.settings.think; } // 1.0.2 had one on/off switch
     if (!['fast', 'careful'].includes(out.settings.mode)) out.settings.mode = 'fast';
-    out.prompts = Object.assign({ split: null, survey: null, organize: null }, (s && s.prompts) || {});
-    for (const k of ['notes', 'items', 'tasks', 'words', 'rules', 'folderFiles', 'folderOriginals']) if (!Array.isArray(out[k])) out[k] = [];
+    out.prompts = Object.assign({ split: null, survey: null, organize: null, fix: null }, (s && s.prompts) || {});
+    for (const k of ['notes', 'items', 'tasks', 'words', 'rules', 'folderFiles', 'folderOriginals', 'runLog']) if (!Array.isArray(out[k])) out[k] = [];
+    if (!['typos', 'clean'].includes(out.settings.editStyle)) out.settings.editStyle = 'typos';
+    // 1.0.4 one place rule: "also show in" tags made by the AI before 1.0.4 are removed once
+    if (((s && s.schema) || 1) < 2) out.items.forEach((it) => { if (Array.isArray(it.tags)) it.tags = []; });
     if (!Array.isArray(out.categories) || !out.categories.length) out.categories = C.defaultCategories();
     for (const sys of ['todo', 'unsorted']) if (!out.categories.some((c) => c.id === sys)) out.categories.push(C.defaultCategories().find((c) => c.id === sys));
-    out.app = 'mind-desk'; out.schema = 1;
+    out.app = 'mind-desk'; out.schema = 2;
     return out;
   }
 
@@ -120,7 +124,7 @@
   const cat = (id) => S.categories.find((c) => c.id === id);
   const noteOf = (it) => S.notes.find((n) => n.id === it.noteId);
   const itemTasks = (id) => S.tasks.filter((t) => t.itemId === id);
-  const ctx = () => ({ cats: S.categories, words: S.words, rules: S.rules, max: S.settings.surveyMax });
+  const ctx = () => ({ cats: S.categories, words: S.words, rules: S.rules, max: S.settings.surveyMax, editStyle: S.settings.editStyle, noTags: true });
   const prompt = (k) => S.prompts[k] || C.DEFAULT_PROMPTS[k];
 
   function noteStatus(n) {
@@ -163,6 +167,7 @@
     numbers: ['bad', 'A number or date changed'],
     negation: ['bad', 'A “not / never / don’t” word disappeared, so the meaning may have flipped'],
     taskcheck: ['warn', 'A task may not match your note. Check the tasks.'],
+    thinkcut: ['warn', 'Careful thinking took too long, so this was answered in Fast mode'],
     splitguess: ['warn', 'Your original text was divided approximately (very long note). Check “Show my original”.'],
   };
   /** the AI's thinking, folded away by default */
@@ -237,9 +242,52 @@
     return { content: c, thinking: th.trim().slice(0, 20000) };
   }
   const NO_THINK_SWITCH = new Set();
+  /** read Ollama's answer piece by piece, so the live panel can show progress and long thinking can be stopped */
+  async function readStream(r, thinking) {
+    const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '', content = '', thought = '';
+    const t0 = Date.now(); const limit = Math.max(10, +S.settings.thinkLimitSec || 120) * 1000;
+    const eat = (line) => {
+      line = line.trim(); if (!line) return;
+      let o; try { o = JSON.parse(line); } catch (e) { return; }
+      if (o.error) throw new Error('Ollama: ' + o.error);
+      const m = o.message || {}; if (m.thinking) thought += m.thinking; if (m.content) content += m.content;
+    };
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i; while ((i = buf.indexOf('\n')) >= 0) { eat(buf.slice(0, i)); buf = buf.slice(i + 1); }
+      liveUpdate(thought, content);
+      if (thinking && !content && Date.now() - t0 > limit) { // thinking for too long: stop and answer quickly instead
+        try { await reader.cancel(); } catch (e) { /* ignore */ }
+        const e = new Error('The AI was still thinking after ' + Math.round(limit / 1000) + ' seconds.'); e.thinkTooLong = true; e.thinking = thought; throw e;
+      }
+    }
+    eat(buf);
+    return splitThink(content, thought);
+  }
+  /* live panel: seconds counter and the last part of the AI's thinking while it works */
+  const LIVE = { t0: 0, timer: null, thinking: '', content: '', step: '' };
+  function liveStart(step) {
+    LIVE.t0 = Date.now(); LIVE.thinking = ''; LIVE.content = ''; LIVE.step = step;
+    clearInterval(LIVE.timer); LIVE.timer = setInterval(livePaint, 500); livePaint();
+  }
+  function liveUpdate(thinking, content) { LIVE.thinking = thinking; LIVE.content = content; }
+  function liveStop() { clearInterval(LIVE.timer); LIVE.timer = null; LIVE.t0 = 0; livePaint(); }
+  function livePaint() {
+    const info = $('#liveinfo'); const panel = $('#livepanel');
+    if (!LIVE.t0 || !RUN.active) { if (info) info.textContent = ''; if (panel) panel.hidden = true; return; }
+    const sec = Math.round((Date.now() - LIVE.t0) / 1000);
+    const state = LIVE.content ? 'writing the answer' : LIVE.thinking ? 'thinking' : 'waiting for the AI';
+    if (info) info.textContent = `${sec} s · ${state}`;
+    if (panel) {
+      panel.hidden = !LIVE.thinking || UI.hideLive;
+      if (!panel.hidden) $('#livetext').textContent = '…' + LIVE.thinking.slice(-600);
+    }
+  }
   async function ollamaChat(system, user, schema, outFactor = 1, think = false) {
     const s = S.settings; const base = s.ollamaUrl.replace(/\/+$/, '');
-    const body = { model: s.model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], stream: false, options: { temperature: +s.temperature, num_ctx: ctxSize(system, user, outFactor, think) }, keep_alive: '10m' };
+    const body = { model: s.model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], stream: true, options: { temperature: +s.temperature, num_ctx: ctxSize(system, user, outFactor, think) }, keep_alive: '10m' };
     // Careful: the AI thinks first (thinking comes back separately). The JSON shape is then asked for in words only,
     // because a fixed JSON format can stop some models from thinking.
     const plain = NO_THINK_SWITCH.has(s.model); // this model rejected the thinking switch earlier: ask normally
@@ -248,7 +296,7 @@
       for (let attempt = 0; attempt < 2; attempt++) {
         let r;
         try { r = await fetch(base + '/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }); } catch (e) { if (e.name === 'AbortError') throw e; throw connError(base); }
-        if (r.ok) { const j = await r.json(); const m = j.message || {}; return splitThink(m.content, m.thinking); }
+        if (r.ok) return await readStream(r, !!body.think);
         const t = await r.text();
         if ('think' in body && /think/i.test(t)) { // this model cannot switch thinking on/off: just ask normally
           if (body.think && schema) body.format = schema;
@@ -276,16 +324,34 @@
   const STEP_KEY = { split: 'thinkSplit', survey: 'thinkSurvey', organize: 'thinkOrganize' };
   /** does this step think in the current run? (Careful mode and the step is ticked in Settings) */
   const thinks = (step) => RUN.mode === 'careful' && S.settings[STEP_KEY[step]] !== false;
-  /** one AI request that must return JSON; tries twice. Returns {data, thinking} */
-  async function aiJSON(step, system, user) {
-    let last; let thinking = '';
-    for (let attempt = 0; attempt < 2; attempt++) {
-      if (RUN.stop) throw abortErr();
-      const r = S.settings.provider === 'openai' ? await openaiChat(system, user) : await ollamaChat(system, user, C.SCHEMAS[step], step === 'organize' ? 1 : 0.2, thinks(step));
-      if (r.thinking) thinking += (thinking ? '\n\n— second try —\n' : '') + r.thinking;
-      try { return { data: C.parseJSON(r.content), thinking }; } catch (e) { last = e; }
-    }
-    throw last;
+  /** one AI request that must return JSON; tries twice. Returns {data, thinking, ms, cut} and writes a line to the run log */
+  async function aiJSON(step, system, user, noteName) {
+    let last; let thinking = ''; let cut = false; const t0 = Date.now();
+    let think = thinks(step);
+    const log = (ok, err) => {
+      S.runLog.push({ at: Date.now(), step, note: noteName || '', mode: think || cut ? 'careful' : 'fast', ms: Date.now() - t0, ok, err: err || '', cut, thinkChars: thinking.length });
+      if (S.runLog.length > 300) S.runLog.splice(0, S.runLog.length - 300);
+    };
+    liveStart(step);
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (RUN.stop) throw abortErr();
+        let r;
+        try {
+          r = S.settings.provider === 'openai' ? await openaiChat(system, user) : await ollamaChat(system, user, C.SCHEMAS[step], step === 'organize' || step === 'fix' ? 1 : 0.2, think);
+        } catch (e) {
+          if (!e.thinkTooLong) throw e;
+          cut = true; think = false; thinking += (e.thinking || '') + '\n[Thinking stopped after the time limit; answered in Fast mode.]';
+          r = await ollamaChat(system, user, C.SCHEMAS[step], step === 'organize' || step === 'fix' ? 1 : 0.2, false);
+        }
+        if (r.thinking) thinking += (thinking ? '\n\n— second try —\n' : '') + r.thinking;
+        try { const data = C.parseJSON(r.content); log(true); return { data, thinking, ms: Date.now() - t0, cut }; } catch (e) { last = e; }
+      }
+      log(false, last && last.message); throw last;
+    } catch (e) {
+      if (e !== last) log(false, e.name === 'AbortError' ? 'stopped' : e.message);
+      throw e;
+    } finally { liveStop(); }
   }
   function abortErr() { const e = new Error('Stopped'); e.name = 'AbortError'; return e; }
 
@@ -318,7 +384,8 @@
     const p = $('#progress'); if (!p) return;
     if (!RUN.active) { p.innerHTML = ''; return; }
     const pct = total ? Math.round((done / total) * 100) : 0;
-    p.innerHTML = `<span>${esc(label)}${total ? ` ${done}/${total}` : ''}</span><span class="bar"><i style="width:${pct}%"></i></span><button class="btn small" data-act="stopRun">Stop</button>`;
+    p.innerHTML = `<span>${esc(label)}${total ? ` ${done}/${total}` : ''}</span><span class="muted" id="liveinfo"></span><span class="bar"><i style="width:${pct}%"></i></span><button class="btn small" data-act="stopRun">Stop</button>`;
+    livePaint();
   }
 
   function newItem(note, k, text) {
@@ -339,18 +406,18 @@
     const blocks = C.makeBlocks(note.text, true);
     if (!blocks.length) { note.status = 'split'; return; }
     if (blocks.length === 1) { addItemsFromGroups(note, blocks, [[0]]); return; }
-    const groups = []; const thoughts = [];
+    const groups = []; const thoughts = []; let splitMs = 0;
     for (const win of C.blockWindows(blocks)) {
       if (win.length === 1) { groups.push(win); continue; }
       let starts;
       try {
         const p = C.buildSplitPrompt(prompt('split'), blocks, win);
-        const a = await aiJSON('split', p.system, p.user); starts = a.data.starts;
+        const a = await aiJSON('split', p.system, p.user, note.name); starts = a.data.starts; splitMs += a.ms;
         if (a.thinking) thoughts.push(a.thinking);
       } catch (e) { if (e.name === 'AbortError' || e.conn) throw e; starts = win.map((_, k) => k + 1); }
       for (const g of C.groupsFromStarts(win.length, starts, hardStarts(blocks, win))) groups.push(g.map((k) => win[k]));
     }
-    note.splitThinking = thoughts.join('\n\n').slice(0, 20000) || undefined;
+    note.splitThinking = thoughts.join('\n\n').slice(0, 20000) || undefined; note.splitMs = splitMs || undefined;
     addItemsFromGroups(note, blocks, groups);
   }
 
@@ -390,7 +457,7 @@
       try {
         if (manual) all = all.concat((await askManual(`Step 2 of 3: questions about your notes${chunks.length > 1 ? ` (part ${i + 1} of ${chunks.length})` : ''}`, C.bulkSurveyPrompt(prompt('survey'), chunks[i].text, ctx()))).questions || []);
         else {
-          const p = C.buildSurveyPrompt(prompt('survey'), chunks[i].text, ctx()); const a = await aiJSON('survey', p.system, p.user);
+          const p = C.buildSurveyPrompt(prompt('survey'), chunks[i].text, ctx()); const a = await aiJSON('survey', p.system, p.user, [...chunks[i].items].map((it) => (noteOf(it) || {}).name).filter(Boolean)[0]);
           all = all.concat(a.data.questions || []); if (a.thinking) thoughts.push(a.thinking);
         }
       } catch (e) { if (e.name === 'AbortError' || e.conn) throw e; chunks[i].items.forEach((it) => failed.add(it)); }
@@ -401,10 +468,12 @@
     return C.checkSurvey(all, ctx());
   }
 
-  function applyResult(it, chk, thinking) {
+  function applyResult(it, chk, thinking, ms, cut) {
     if (!alive(it)) return; // deleted or replaced meanwhile: drop the answer
-    it.thinking = thinking ? String(thinking).slice(0, 20000) : undefined; it.mode = RUN.mode || 'fast';
-    it.title = chk.title; it.cat = chk.category; it.tags = chk.tags; it.text = chk.text; it.flags = chk.flags; it.lost = chk.lost; it.error = '';
+    it.thinking = thinking ? String(thinking).slice(0, 20000) : undefined; it.mode = RUN.mode || 'fast'; it.ms = ms || undefined;
+    if (cut) chk.flags.push('thinkcut');
+    it.tags = Array.isArray(it.tags) ? it.tags : []; // one place rule: the AI no longer adds "also show in"; your own choices stay
+    it.title = chk.title; it.cat = chk.category; it.text = chk.text; it.flags = chk.flags; it.lost = chk.lost; it.error = '';
     it.status = 'review'; it.updatedAt = Date.now();
     S.tasks = S.tasks.filter((t) => t.itemId !== it.id).concat(chk.tasks.map((t) => ({ id: C.uid('t'), itemId: it.id, text: t.text, done: t.done, cat: t.cat, createdAt: it.createdAt })));
   }
@@ -416,18 +485,21 @@
   const SERIOUS = ['shortened', 'lostword', 'bigchange', 'numbers', 'negation'];
   async function organizeOne(it) {
     const c = ctx(); const p = C.buildOrganizePrompt(prompt('organize'), it.original, c);
-    const a1 = await aiJSON('organize', p.system, p.user);
-    let chk = C.checkOrganize(a1.data, it.original, c); let thinking = a1.thinking;
+    const nm = (noteOf(it) || {}).name;
+    const a1 = await aiJSON('organize', p.system, p.user, nm);
+    let chk = C.checkOrganize(a1.data, it.original, c); let thinking = a1.thinking; let ms = a1.ms; let cut = a1.cut;
     if (chk.flags.some((f) => SERIOUS.includes(f))) {
-      const strict = p.system + '\n\nIMPORTANT: a previous answer changed or removed words. Return the note with ONLY typo fixes. Every other word must stay exactly the same.';
+      const strict = p.system + (S.settings.editStyle === 'clean'
+        ? '\n\nIMPORTANT: a previous answer lost content or changed a fact (a number, a name, a "not"). Keep every point, number, name and "not" exactly; only fix typos and make sentences clearer.'
+        : '\n\nIMPORTANT: a previous answer changed or removed words. Return the note with ONLY typo fixes. Every other word must stay exactly the same.');
       try {
-        const a2 = await aiJSON('organize', strict, p.user);
+        const a2 = await aiJSON('organize', strict, p.user, nm); ms += a2.ms; cut = cut || a2.cut;
         const chk2 = C.checkOrganize(a2.data, it.original, c);
         const bad = (x) => x.flags.filter((f) => SERIOUS.includes(f)).length;
         if (bad(chk2) <= bad(chk)) { chk = chk2; thinking = a2.thinking ? (a1.thinking ? a1.thinking + '\n\n— asked again, stricter —\n' : '') + a2.thinking : thinking; }
       } catch (e) { if (e.name === 'AbortError' || e.conn) throw e; }
     }
-    applyResult(it, chk, thinking);
+    applyResult(it, chk, thinking, ms, cut);
   }
   async function organizeManual(items) {
     const size = Math.max(1, +S.settings.manualBatch || 20); const parts = Math.ceil(items.length / size); let missing = 0;
@@ -446,15 +518,18 @@
 
   function waitSurvey() { return new Promise((resolve, reject) => { RUN.surveyWait = { resolve, reject }; }); }
 
-  async function organizeAll() {
+  /** organize new notes; with noteIds, only those notes */
+  async function organizeAll(noteIds) {
     if (RUN.active) return;
     const manual = S.settings.provider === 'manual';
-    if (!S.notes.some((n) => n.status === 'new') && !S.items.some((i) => i.status === 'pending')) { toast('Nothing new to organize. Add notes first.'); return; }
+    const mine = (n) => !noteIds || noteIds.includes(n.id);
+    const mineItem = (i) => !noteIds || noteIds.includes(i.noteId);
+    if (!S.notes.some((n) => n.status === 'new' && mine(n)) && !S.items.some((i) => i.status === 'pending' && mineItem(i))) { toast(noteIds ? 'This note is already organized.' : 'Nothing new to organize. Add notes first.'); return; }
     const warn = remoteWarning().filter((w) => !/Copy & paste/.test(w));
     if (warn.length && !window.confirm(warn.join('\n') + '\n\nContinue?')) return;
     RUN.active = true; RUN.stop = false; RUN.mode = S.settings.mode; paintTop();
     try {
-      const fresh = S.notes.filter((n) => n.status === 'new');
+      const fresh = S.notes.filter((n) => n.status === 'new' && mine(n));
       if (fresh.length) {
         if (manual) { setProgress('Splitting notes', 0, 0); await splitManual(fresh); save(); } else {
           for (let i = 0; i < fresh.length; i++) {
@@ -468,7 +543,7 @@
         UI.view = 'survey'; render(); setProgress('Waiting for your answers', 0, 0);
         await waitSurvey();
       }
-      const unsurveyed = S.items.filter((i) => i.status === 'pending' && !i.surveyed);
+      const unsurveyed = S.items.filter((i) => i.status === 'pending' && !i.surveyed && mineItem(i));
       if (S.settings.survey && unsurveyed.length) {
         setProgress('Reading your notes for questions', 0, 0);
         const qs = await runSurvey(unsurveyed);
@@ -479,7 +554,7 @@
           await waitSurvey();
         }
       } else unsurveyed.forEach((i) => { i.surveyed = true; });
-      const todo = S.items.filter((i) => i.status === 'pending');
+      const todo = S.items.filter((i) => i.status === 'pending' && mineItem(i));
       if (manual) { setProgress('Organizing', 0, 0); await organizeManual(todo); } else {
         for (let i = 0; i < todo.length; i++) {
           if (RUN.stop) throw abortErr();
@@ -549,7 +624,7 @@
   /* ================= export / import ================= */
   function exportObj() {
     const o = JSON.parse(JSON.stringify(S)); o.exportedAt = Date.now(); o.version = VERSION;
-    delete o.folderFiles; delete o.folderOriginals; delete o.rev; if (o.settings) delete o.settings.oaKey; // never put the API key in a backup
+    delete o.folderFiles; delete o.folderOriginals; delete o.rev; delete o.runLog; if (o.settings) delete o.settings.oaKey; // never put the API key in a backup
     return o;
   }
   function download(name, text, type) {
@@ -617,7 +692,7 @@
   function paintTop() {
     const pendingWork = S.notes.filter((n) => n.status === 'new').length + S.items.filter((i) => i.status === 'pending').length;
     const searchable = UI.view.startsWith('cat:') || UI.view === 'todo';
-    $('#top').innerHTML = `<h1>${esc(viewTitle())}</h1>
+    $('#top').innerHTML = `<button class="btn small sidetoggle" data-act="toggleSide" title="${S.settings.sidebar === 'hide' ? 'Show' : 'Hide'} the menu" aria-label="Show or hide the menu">☰</button><h1>${esc(viewTitle())}</h1>
       ${searchable ? `<input type="search" id="search" placeholder="Search…" value="${esc(UI.search)}" aria-label="Search">` : ''}
       <div class="grow"></div><div class="progress" id="progress"></div>
       ${S.settings.provider === 'manual' ? '' : `<select id="modeSel" data-set="mode" aria-label="Fast or careful" ${RUN.active ? 'disabled' : ''} title="Fast: quick answers. Careful: the AI thinks first (slower, better at understanding what you meant).">
@@ -656,7 +731,9 @@
       const its = S.items.filter((i) => i.noteId === n.id).sort((a, b) => a.order - b.order);
       mid = `<div class="row" style="margin-bottom:10px"><h2 style="margin:0;font-size:16px;flex:1">${esc(n.name)}</h2>
           <button class="btn small" data-act="renameNote" data-id="${esc(n.id)}">Rename</button>
+          ${noteStatus(n) === 'new' || noteStatus(n) === 'split' ? `<button class="btn small primary" data-act="organizeNote" data-id="${esc(n.id)}" ${RUN.active ? 'disabled' : ''}>✨ Organize this note</button>` : ''}
           ${n.status !== 'new' ? `<button class="btn small" data-act="reorganizeNote" data-id="${esc(n.id)}">Organize again</button>` : ''}
+          <button class="btn small" data-act="report" data-id="${esc(n.id)}" title="Copy what Mind Desk shows for this note, to paste into a chat with Claude">📋 Report for Claude</button>
           <button class="btn small danger" data-act="deleteNote" data-id="${esc(n.id)}">Delete</button></div>
         <div class="muted small" style="margin-bottom:8px">Added ${esc(fmtTime(n.addedAt))} · ${n.text.length.toLocaleString()} characters · ${n.source === 'file' ? 'from a file' : 'pasted'}</div>
         <div class="notebody pre">${esc(n.text)}</div>${thinkBox(n.splitThinking, 'Show how the AI decided to split this note')}`;
@@ -690,7 +767,7 @@
       <div class="field"><label for="edTitle">Title</label><input type="text" id="edTitle" value="${esc(it.title)}"></div>
       <div class="grid2"><div class="field"><label for="edCat">Category</label><select id="edCat">${catOptions(it.cat)}</select></div>
         <div class="field"><label>Also show in</label><div class="row">${tags.map((c) => `<label class="small"><input type="checkbox" data-tag="${esc(c.id)}" ${it.tags.includes(c.id) ? 'checked' : ''}> ${esc(C.catPath(cats(), c.id))}</label>`).join('')}</div></div></div>
-      <div class="field"><label for="edText">Text</label><textarea id="edText" rows="${Math.min(24, it.text.split('\n').length + 3)}">${esc(it.text)}</textarea>
+      <div class="field"><div class="row"><label for="edText" style="flex:1">Text</label>${S.settings.provider !== 'manual' ? '<button class="btn small" data-act="fixTyping" title="Let the AI fix the typing in this box (or only in the part you selected). You see the changes before they are used.">✨ Fix my typing</button>' : ''}</div><textarea id="edText" rows="${Math.min(24, it.text.split('\n').length + 3)}">${esc(it.text)}</textarea>
         <span class="hint">Tip: put <code>---</code> on its own line to split this into two items.</span></div>
       <div class="field"><label>Tasks</label><div id="edTasks">${tasks.map(taskRow).join('')}</div>
         <div><button class="btn small" data-act="addTaskRow">＋ Add task</button></div></div>
@@ -792,8 +869,8 @@
     let h = c.desc ? `<p class="hint" style="margin-top:0">${esc(c.desc)}</p>` : '';
     if (kids.length) h += `<div class="row" style="margin-bottom:14px">${kids.map((k) => `<button class="btn small" data-act="nav" data-v="cat:${esc(k.id)}">${esc(k.name)} (${itemsIn(k.id).length})</button>`).join('')}</div>`;
     const linked = C.todoSubs(cats()).filter((s) => s.area === id).map((s) => s.id);
-    const tasks = C.visibleTasks(S).filter((t) => linked.includes(t.cat) && !t.done && (!q || t.text.toLowerCase().includes(q)));
-    if (tasks.length) h += `<div class="todogroup"><h2>Open tasks <span class="chip">${tasks.length}</span></h2>${tasks.map(taskHtml).join('')}</div>`;
+    const tasks = C.visibleTasks(S).filter((t) => linked.includes(t.cat) && !t.done);
+    if (tasks.length) h += `<p><a href="#" data-act="nav" data-v="todo">☑ ${tasks.length} open task${tasks.length > 1 ? 's' : ''} for this area ${tasks.length > 1 ? 'are' : 'is'} in To-do →</a></p>`; // one place rule
     if (!items.length) h += `<div class="empty"><b>${q ? 'No matches' : 'Nothing here yet'}</b>${q ? 'Try another search.' : 'Approved notes for this category show here.'}</div>`;
     h += items.map(itemCard).join('');
     return h;
@@ -841,9 +918,15 @@
       <p class="hint">Choose next to <b>✨ Organize all</b> each time. <b>⚡ Fast</b>: quick answers, no thinking. <b>🧠 Careful</b>: the AI thinks first. Slower (often 2–3 times), but better at understanding what you meant. The thinking is saved and folded away under <b>Show AI’s thinking</b>.</p>
       <p style="margin:8px 0 4px">In Careful mode, let the AI think in:</p>
       <div class="row">${sField('thinkSplit', 'Step 1: splitting notes', 'checkbox')}${sField('thinkSurvey', 'Step 2: questions', 'checkbox')}${sField('thinkOrganize', 'Step 3: organizing (typos, category, tasks)', 'checkbox')}</div>
+      <div style="max-width:320px;margin-top:8px">${sField('thinkLimitSec', 'Stop thinking after (seconds) and answer in Fast mode instead', 'number', 'min="10" max="1800"')}</div>
       <p class="muted small" style="margin-top:6px">Some models cannot think. Careful mode then works like Fast mode.</p></div>`;
+    const er = (v, label, hint) => `<label style="display:block;margin-bottom:6px"><input type="radio" name="editstyle" data-set="editStyle" value="${v}" ${s.editStyle === v ? 'checked' : ''}> <b>${label}</b> <span class="muted small">${hint}</span></label>`;
+    const writing = `<div class="box"><h2>How much may the AI change your text?</h2>
+      ${er('typos', 'Fix typos only', '— keeps your exact words and voice (recommended)')}
+      ${er('clean', 'Clean up wording', '— fixes typos and makes sentences clearer; facts, numbers, names and “not” must stay')}
+      <p class="muted small">Used when organizing and by <b>✨ Fix my typing</b> in the editor. Your original text is always kept.</p></div>`;
     const survey = `<div class="box"><h2>Questions before organizing</h2>${sField('survey', 'Let the AI ask me about words and notes it does not understand', 'checkbox')}<div style="max-width:220px;margin-top:8px">${sField('surveyMax', 'Maximum questions per run', 'number', 'min="1" max="20"')}</div></div>`;
-    return ai + mode + survey + catEditor() + promptEditor() + storageBox() + `<div class="box"><h2>Look</h2><div class="field" style="max-width:220px"><label for="set-theme">Theme</label>
+    return ai + mode + writing + survey + reportBox() + catEditor() + promptEditor() + storageBox() + `<div class="box"><h2>Look</h2><div class="field" style="max-width:220px"><label for="set-theme">Theme</label>
       <select id="set-theme" data-set="theme"><option value="auto"${s.theme === 'auto' ? ' selected' : ''}>Same as Windows</option><option value="light"${s.theme === 'light' ? ' selected' : ''}>Light</option><option value="dark"${s.theme === 'dark' ? ' selected' : ''}>Dark</option></select></div></div>
       <div class="box"><h2>Danger zone</h2><button class="btn danger" data-act="deleteAll">Delete everything in Mind Desk</button><p class="muted small">Mind Desk ${esc(VERSION)}</p></div>`;
   }
@@ -879,11 +962,15 @@
       <div class="row" style="margin-top:12px"><input type="text" id="newCatName" placeholder="New category name"><select id="newCatParent"><option value="">(top level)</option>${tops.filter((t) => t.id !== 'unsorted').map((t) => `<option value="${esc(t.id)}">under ${esc(t.name)}</option>`).join('')}</select><button class="btn" data-act="addCat">＋ Add</button></div></div>`;
   }
   function promptEditor() {
-    const names = { split: 'Step 1: split notes', survey: 'Step 2: questions', organize: 'Step 3: organize' };
+    const names = { split: 'Step 1: split notes', survey: 'Step 2: questions', organize: 'Step 3: organize', fix: '✨ Fix my typing (editor)' };
     return `<div class="box"><h2>AI instructions (advanced)</h2><details><summary>Show and edit the prompts</summary>
       <p class="hint">Change these to tune how the AI behaves. Keep the parts in {{double braces}} and the JSON format line.</p>
       ${Object.keys(names).map((k) => `<div class="field"><label for="pr-${k}"><b>${names[k]}</b>${S.prompts[k] ? ' <span class="chip warn">edited</span>' : ''}</label>
         <textarea id="pr-${k}" data-prompt="${k}" rows="10">${esc(prompt(k))}</textarea><div><button class="btn small" data-act="resetPrompt" data-k="${k}">Reset to default</button></div></div>`).join('')}</details></div>`;
+  }
+  function reportBox() {
+    return `<div class="box"><h2>Report for Claude</h2><p class="hint">Copies what Mind Desk shows (your notes, how the AI split and cleaned them, warnings, timings) as text, to paste into a chat with Claude when something looks wrong. You see it before copying and can hide names.</p>
+      <div class="row"><button class="btn" data-act="report" data-scope="review">Report: items waiting for review</button><button class="btn" data-act="report" data-scope="all">Report: all notes</button></div></div>`;
   }
   function storageBox() {
     const can = 'showDirectoryPicker' in window && !!store.db;
@@ -928,9 +1015,12 @@
       if (busy()) return;
       const n = S.notes.find((x) => x.id === el.dataset.id); const its = S.items.filter((i) => i.noteId === n.id);
       if (its.length && !window.confirm(`This removes the ${its.length} item(s) made from this note (also approved ones and their tasks) and organizes the note again. Continue?`)) return;
-      removeItems(its.map((i) => i.id)); n.status = 'new'; save(); render(); organizeAll();
+      removeItems(its.map((i) => i.id)); n.status = 'new'; save(); render(); organizeAll([n.id]);
     },
     organizeAll() { organizeAll(); },
+    organizeNote(el) { organizeAll([el.dataset.id]); },
+    toggleSide() { S.settings.sidebar = S.settings.sidebar === 'hide' ? 'show' : 'hide'; applySide(); save(); paintTop(); },
+    hideLive() { UI.hideLive = true; livePaint(); },
     stopRun() {
       RUN.stop = true; if (RUN.ctrl) RUN.ctrl.abort();
       if (RUN.surveyWait) RUN.surveyWait.reject(abortErr());
@@ -999,6 +1089,67 @@
         else if (qs.length) { S.survey = { questions: qs, createdAt: Date.now() }; if (RUN.surveyThinking) S.survey.thinking = RUN.surveyThinking; UI.view = 'survey'; toast('Answer the questions, then use “Ask AI again” on the note.', 6000); } else toast('No questions this time.');
       } catch (e) { if (e.name !== 'AbortError') showError(e); } finally { RUN.active = false; save(); render(); }
     },
+    async fixTyping() {
+      if (busy()) return;
+      const ta = $('#edText'); if (!ta) return;
+      const a = ta.selectionStart, b = ta.selectionEnd; const part = a !== b;
+      const text = part ? ta.value.slice(a, b) : ta.value;
+      if (!text.trim()) { toast('Write something first.'); return; }
+      captureDraft();
+      RUN.active = true; RUN.stop = false; RUN.mode = 'fast'; paintTop(); setProgress('Fixing your typing', 0, 0);
+      let fixed;
+      try {
+        const p = C.buildFixPrompt(prompt('fix'), text, ctx());
+        const r = await aiJSON('fix', p.system, p.user, 'editor');
+        fixed = String((r.data && r.data.text) || '').trim();
+        if (!fixed) throw new Error('The AI gave no text back.');
+      } catch (e) { if (e.name !== 'AbortError') showError(e); return; } finally { RUN.active = false; paintTop(); }
+      const chk = C.checkOrganize({ title: 't', category: 'unsorted', tasks: [], text: fixed }, text, ctx());
+      const warn = chk.flags.filter((f) => ['numbers', 'negation', 'lostword', 'shortened', 'bigchange'].includes(f));
+      const d = diffHtml(text, fixed);
+      modal(`<h2>✨ Fix my typing</h2><p class="hint">${part ? 'Only the part you selected.' : 'The whole text.'} Red = removed, green = added.</p>
+        ${warn.length ? `<div class="row" style="margin-bottom:8px">${warn.map((f) => `<span class="chip ${FLAG_TEXT[f][0]}">${esc(FLAG_TEXT[f][1])}</span>`).join(' ')}</div>` : ''}
+        <div class="cmp"><div><div class="lbl">You wrote</div><div class="pre">${d.left}</div></div><div><div class="lbl">Fixed</div><div class="pre">${d.right}</div></div></div>
+        <div class="actions"><button class="btn primary" id="fxOk">Use the fixed text</button><button class="btn" data-act="closeModal">Keep mine</button></div>`, closeModal, '#fxOk');
+      $('#fxOk').onclick = () => {
+        closeModal(); const t = $('#edText'); if (!t) return;
+        t.value = part ? t.value.slice(0, a) + fixed + t.value.slice(b) : fixed;
+        UI.dirty = true; captureDraft(); t.focus();
+      };
+    },
+    report(el) {
+      const scope = el.dataset.id ? 'note' : el.dataset.scope || 'all';
+      const ids = scope === 'note' ? [el.dataset.id] : scope === 'review' ? [...new Set(S.items.filter((i) => i.status === 'review').map((i) => i.noteId))] : null;
+      if (ids && !ids.length) { toast('Nothing waiting for review.'); return; }
+      const notes = S.notes.filter((n) => !ids || ids.includes(n.id));
+      const cand = C.nameCandidates(notes.map((n) => n.text).join('\n'), S.words);
+      modal(`<h2>📋 Report for Claude</h2>
+        <p class="hint">${notes.length} note(s). This text contains your notes. Check it before you paste it anywhere.</p>
+        <div class="row" style="margin-bottom:8px">
+          <label class="small"><input type="checkbox" id="rpThink" checked> AI thinking</label>
+          <label class="small"><input type="checkbox" id="rpSet" checked> categories, my words &amp; rules</label>
+          <label class="small"><input type="checkbox" id="rpLog" checked> timings of the last AI requests</label></div>
+        <div class="field"><label for="rpHide"><input type="checkbox" id="rpHideOn" ${cand.length ? 'checked' : ''}> Hide these names (replaced by Person 1, Person 2 …; edit the list, separate with commas)</label>
+          <input type="text" id="rpHide" value="${esc(cand.join(', '))}" placeholder="for example: Ravi, Naveen"></div>
+        <textarea id="rpText" rows="14" readonly></textarea>
+        <div class="row" style="margin-top:6px"><span class="muted small" id="rpSize"></span></div>
+        <div class="actions"><button class="btn primary" id="rpCopy">Copy</button><button class="btn" id="rpDl">Download .txt</button>${FOLDER.handle && FOLDER.ok ? '<button class="btn" id="rpSave">Save to my Mind Desk folder</button>' : ''}<button class="btn" data-act="closeModal">Close</button></div>`, closeModal, '#rpCopy');
+      const make = () => {
+        const hide = $('#rpHideOn').checked ? $('#rpHide').value.split(',').map((x) => x.trim()).filter(Boolean) : [];
+        const txt = C.buildReport(S, { noteIds: ids, thinking: $('#rpThink').checked, settings: $('#rpSet').checked, prompts: $('#rpSet').checked, runLog: $('#rpLog').checked, hide, version: VERSION });
+        $('#rpText').value = txt; $('#rpSize').textContent = `${txt.length.toLocaleString()} characters${txt.length > 60000 ? ' — large: Download is easier than Copy' : ''}`;
+        return txt;
+      };
+      ['#rpThink', '#rpSet', '#rpLog', '#rpHideOn'].forEach((sel) => { $(sel).onchange = make; });
+      $('#rpHide').oninput = make;
+      make();
+      const name = `mind-desk-report-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.txt`;
+      $('#rpCopy').onclick = async () => { const t = make(); try { await navigator.clipboard.writeText(t); } catch (e) { $('#rpText').select(); document.execCommand('copy'); } toast('Report copied. Paste it into your chat with Claude.'); };
+      $('#rpDl').onclick = () => download(name, make(), 'text/plain');
+      if ($('#rpSave')) $('#rpSave').onclick = async () => {
+        try { const dir = await FOLDER.handle.getDirectoryHandle('Reports', { create: true }); await writeFile(dir, name, make()); toast('Saved in your folder: Reports\\' + name, 6000); } catch (e) { showError(e); }
+      };
+    },
     deleteItem(el) { if (busy()) return; if (!window.confirm('Delete this item and its tasks? (Your original note stays in the Inbox.)')) return; removeItems([el.dataset.id]); save(); render(); },
     flaggedOnly(el) { UI.flaggedOnly = el.checked; renderContent(); },
     toggleTask(el) { const t = S.tasks.find((x) => x.id === el.dataset.id); t.done = el.checked; t.doneAt = t.done ? Date.now() : null; save(); render(); },
@@ -1049,7 +1200,7 @@
       const c = ctx(); const p = C.buildOrganizePrompt(prompt('organize'), sample, c); const t0 = Date.now();
       RUN.active = true; RUN.stop = false; RUN.mode = S.settings.mode;
       try {
-        const a = await aiJSON('organize', p.system, p.user); const chk = C.checkOrganize(a.data, sample, c);
+        const a = await aiJSON('organize', p.system, p.user, 'test note'); const chk = C.checkOrganize(a.data, sample, c);
         setConn(`<div class="banner info">✓ The AI answered in ${((Date.now() - t0) / 1000).toFixed(1)} s (${RUN.mode === 'careful' ? 'Careful' : 'Fast'} mode).<br><b>Before:</b> ${esc(sample)}<br><b>After:</b> ${esc(chk.text)}<br><b>Category:</b> ${esc(C.catPath(cats(), chk.category))}${chk.tasks.length ? '<br><b>Tasks:</b> ' + esc(chk.tasks.map((x) => x.text).join(' · ')) : ''}</div>${thinkBox(a.thinking)}`);
       } catch (e) { setConn(`<div class="banner bad">${esc(e.message)}</div>${e.conn ? connHelpHtml() : ''}`); } finally { RUN.active = false; }
     },
@@ -1123,7 +1274,9 @@
     if (RUN.surveyWait) { RUN.surveyWait.resolve(); UI.view = 'inbox'; } else { UI.view = 'inbox'; toast('Saved. Press “Organize all” to continue.'); }
     render();
   }
+  function applySide() { const app = $('.app'); if (app) app.classList.toggle('noside', S.settings.sidebar === 'hide'); }
   function applyTheme() {
+    applySide();
     const t = S.settings.theme; if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
   }
 

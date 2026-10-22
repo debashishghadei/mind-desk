@@ -246,7 +246,7 @@ const fakeFolder = `(() => { const mk = (name) => { const kids = new Map(); retu
     await p.context().close();
   });
 
-  await test('R15 folder/Markdown files match the screen (tagged notes, linked tasks)', async () => {
+  await test('R15 folder/Markdown files match the screen (tagged notes; tasks only in To-do since 1.0.4)', async () => {
     const p = await page();
     const r = await p.evaluate(() => {
       const S = MD.state;
@@ -255,7 +255,8 @@ const fakeFolder = `(() => { const mk = (name) => { const kids = new Map(); retu
       return { clients: MDCore.categoryMarkdown(S, 'clients'), job: MDCore.categoryMarkdown(S, 'job') };
     });
     assert.ok(r.clients.includes('Tagged into clients'), 'tagged note missing');
-    assert.ok(r.job.includes('Send report to owner'), 'linked job task missing');
+    // 1.0.4 owner decision (one place rule): tasks are written only to To-do, not repeated in the Job file
+    assert.ok(!r.job.includes('Send report to owner'), 'task repeated outside To-do');
     await p.context().close();
   });
 

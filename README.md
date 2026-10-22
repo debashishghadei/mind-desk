@@ -35,10 +35,15 @@ With `OLLAMA_ORIGINS=*`, websites you visit could also use your local AI (send i
 ## Daily use
 
 1. **Inbox → Add files** (or drag `.txt` files into the window, or **Paste a note**). The date is added automatically.
-2. Choose **⚡ Fast** (quick) or **🧠 Careful** (the AI thinks first: slower, better at understanding what you meant), then **✨ Organize all**. The AI splits each note into items. In Careful mode, **Show AI's thinking** reveals how it decided.
+2. Choose **⚡ Fast** (quick) or **🧠 Careful** (the AI thinks first: slower, better at understanding what you meant), then **✨ Organize all** — or **✨ Organize this note** on one note in the Inbox. The top bar shows the seconds; in Careful mode a small panel shows the AI thinking live. Afterwards, **Show AI's thinking** reveals how it decided.
 3. **Questions for you.** The AI asks about words and notes it does not understand. Your answers go into **My words & rules** and are used every time from then on.
 4. **Review.** Red = removed, green = added by the AI. Approve, edit, change the category, join with the previous item, or keep your original text. Put `---` on its own line while editing to split an item in two.
-5. **To-do** and the **categories** show only approved items. Tick tasks when done.
+5. **To-do** and the **categories** show only approved items. Each note lives in one category; tasks live only in To-do. Tick tasks when done.
+6. To change a note later: **Edit** it in its category. **✨ Fix my typing** lets the AI clean what you just typed (you see the changes first).
+
+**Something looks wrong?** Click **📋 Report for Claude** on the note (or in Settings), check the text, and paste it into your chat with Claude. You can hide names first.
+
+Settings → **How much may the AI change your text?**: "Fix typos only" (default) or "Clean up wording". **☰** at the top left hides the menu.
 
 Your original notes are never changed. They stay in the Inbox.
 
@@ -59,5 +64,5 @@ Replace `mind-desk.html` (and the `.bat`) with the new files. Your data stays.
 ## For developers
 
 - Source: `src/` (`core.js` logic, `app.js` interface, `style.css`, `index.html`). Build the single file with `node bin/build.js` (`--zip` also makes `dist/mind-desk-<version>.zip`).
-- Tests: `tests/run-tests.js` runs Chromium (Playwright) against `mind-desk.html` opened from a `file://` URL, with a stand-in Ollama (`tests/fake-ollama.js`). `REAL_OLLAMA=http://127.0.0.1:11434` adds a check against a real Ollama. `tests/review-tests.js` and `tests/review2-tests.js` cover the two review rounds; `tests/v103-tests.js` covers Fast/Careful.
+- Tests: `tests/run-tests.js` runs Chromium (Playwright) against `mind-desk.html` opened from a `file://` URL, with a stand-in Ollama (`tests/fake-ollama.js`). `REAL_OLLAMA=http://127.0.0.1:11434` adds a check against a real Ollama. `tests/review-tests.js` and `tests/review2-tests.js` cover the two review rounds; `tests/v103-tests.js` covers Fast/Careful; `tests/v104-tests.js` covers 1.0.4.
 - Shared notes for the AIs working on this repo: `HANDOFF.md`, `DECISIONS.md`.

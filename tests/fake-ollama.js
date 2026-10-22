@@ -52,7 +52,28 @@ function start(port, opts = {}) {
       req.on('data', (c) => { body += c; });
       req.on('end', async () => {
         const j = JSON.parse(body); const sys = j.messages[0].content; const user = j.messages[1].content;
-        state.log.push({ model: j.model, think: j.think, format: !!j.format, options: j.options, system: sys, user });
+        state.log.push({ model: j.model, think: j.think, format: !!j.format, stream: j.stream, options: j.options, system: sys, user });
+        // answer as one JSON (stream:false) or as NDJSON chunks like Ollama (stream:true)
+        const send = async (msg) => {
+          if (!j.stream) return reply(res, 200, { model: j.model, message: msg, done: true }, origin, allowAll);
+          const h = { 'Content-Type': 'application/x-ndjson' }; if (allowAll) h['Access-Control-Allow-Origin'] = '*';
+          res.writeHead(200, h);
+          const line = (o) => res.write(JSON.stringify(o) + '\n');
+          if (msg.thinking) {
+            const parts = msg.thinking.match(/.{1,25}/gs) || [];
+            const longThink = /LONGTHINK/.test(user);
+            for (let k = 0; longThink ? k < 400 : k < parts.length; k++) {
+              if (res.destroyed) return;
+              line({ model: j.model, message: { role: 'assistant', content: '', thinking: longThink ? 'still thinking ' + k + '. ' : parts[k] }, done: false });
+              if (longThink) await new Promise((r) => setTimeout(r, 50));
+            }
+          }
+          const c = msg.content || ''; const half = Math.ceil(c.length / 2);
+          line({ model: j.model, message: { role: 'assistant', content: c.slice(0, half) }, done: false });
+          line({ model: j.model, message: { role: 'assistant', content: c.slice(half) }, done: false });
+          line({ model: j.model, message: { role: 'assistant', content: '' }, done: true });
+          res.end();
+        };
         if (j.model === 'nothink:1b' && 'think' in j) return reply(res, 400, { error: `"nothink:1b" does not support thinking` }, origin, allowAll);
         if (!(opts.models || ['qwen3.5:9b', 'qwen3:8b', 'llama3.2:3b', 'nothink:1b']).includes(j.model)) return reply(res, 404, { error: `model "${j.model}" not found, try pulling it first` }, origin, allowAll);
         if (/SLOW/.test(user)) await new Promise((r) => setTimeout(r, 1500));
@@ -61,16 +82,19 @@ function start(port, opts = {}) {
           const blocks = [...user.matchAll(/\[(\d+)\][^\n]*\n([^\n]*)/g)].map((m) => ({ n: +m[1], first: m[2] }));
           out = /JOINALL/.test(user) ? { starts: [1] } : { starts: blocks.filter((b) => !/^(sol|and also)\b/i.test(b.first)).map((b) => b.n) };
         } else if (/Find at most/.test(sys) && /BADSURVEY/.test(user)) {
-          return reply(res, 200, { message: { content: 'no idea, sorry' } }, origin, allowAll);
+          return send({ role: 'assistant', content: 'no idea, sorry' });
         } else if (/Find at most/.test(sys)) {
           const known = (sys.split('Already explained words:')[1] || '').split('\n').map((l) => l.split(' = ')[0].trim().toLowerCase());
           const terms = [...new Set([...user.matchAll(/\b[A-Z][A-Z0-9]{1,5}\b/g)].map((m) => m[0]))].filter((t) => !['CEO', 'SEO', 'AI'].includes(t) && !known.includes(t.toLowerCase()));
           out = { questions: terms.map((t) => ({ kind: 'word', term: t, guess: 'my guess for ' + t })) };
           if (/Ravi/.test(user)) out.questions.push({ kind: 'intent', quote: 'call Ravi about it', question: 'Is Ravi a client or a friend?', guess: 'client' });
+        } else if (/You fix the typing/.test(sys)) {
+          const t = (user.match(/<<<\n([\s\S]*?)\n>>>/) || [])[1] || '';
+          out = { text: /clearer/.test(sys) ? 'CLEANED: ' + fixText(t) : fixText(t) };
         } else {
           const note = (user.match(/<<<\n([\s\S]*?)\n>>>/) || [])[1] || '';
           const key = note.slice(0, 40); state.counts[key] = (state.counts[key] || 0) + 1;
-          if (/BADJSON/.test(note)) return reply(res, 200, { message: { content: 'sorry, I cannot do JSON' } }, origin, allowAll);
+          if (/BADJSON/.test(note)) return send({ role: 'assistant', content: 'sorry, I cannot do JSON' });
           let text = fixText(note);
           if (/BADSHORT/.test(note) && state.counts[key] === 1) text = text.split(/\s+/).slice(0, 3).join(' ');
           if (/BADWORD/.test(note)) text = text.replace(/IGS/g, 'eggs');
@@ -79,7 +103,7 @@ function start(port, opts = {}) {
         const msg = { role: 'assistant', content: JSON.stringify(out) };
         if (j.think === true) msg.thinking = 'THINKING: the person wrote ' + user.replace(/\s+/g, ' ').slice(-80);
         if (/TAGTHINK/.test(user)) msg.content = '<think>INLINE THOUGHTS here</think>\n' + msg.content;
-        reply(res, 200, { model: j.model, message: msg, done: true }, origin, allowAll);
+        send(msg);
       });
       return;
     }
